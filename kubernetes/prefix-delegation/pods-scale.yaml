@@ -1,0 +1,29 @@
+# PREFIX DELEGATION EXPERIMENT (terraform/45-prefix-delegation): 60 tiny pods on ONE node.
+# Needs terraform/06-eks vpc_cni_prefix_delegation=true AND the node group from 45 (maxPods=110).
+# Run it on the system node group (default max-pods ~17 on t3.medium) and most pods stay Pending; run it here and they all schedule.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pods-scale
+  namespace: cloudcart
+spec:
+  replicas: 60
+  selector:
+    matchLabels: {app: pods-scale}
+  template:
+    metadata:
+      labels: {app: pods-scale}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile: {type: RuntimeDefault}
+      nodeSelector: {cloudcart.io/node-role: prefix-delegation}
+      tolerations:
+        - {key: cloudcart.io/lab, operator: Equal, value: prefix-delegation, effect: NoSchedule}
+      containers:
+        - name: pause
+          image: public.ecr.aws/eks-distro/kubernetes/pause:3.9
+          securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+          resources:
+            requests: {cpu: 5m, memory: 8Mi}

@@ -1,0 +1,15 @@
+# EFS StorageClass (terraform/14-efs creates the file system, mount targets and installs the CSI driver).
+# provisioningMode efs-ap: each PVC gets its OWN access point + directory under basePath (isolation between claims).
+# Render with scripts/render-k8s.sh (fills ${EFS_ID}).
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: efs-ap
+provisioner: efs.csi.aws.com
+volumeBindingMode: Immediate
+reclaimPolicy: Delete
+parameters:
+  provisioningMode: efs-ap
+  fileSystemId: ${EFS_ID}
+  directoryPerms: "700"
+  basePath: /dynamic

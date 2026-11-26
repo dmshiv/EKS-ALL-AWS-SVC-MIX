@@ -1,0 +1,48 @@
+# EFS DEMO: ReadWriteMany. Two pods (spread over different nodes/AZs by anti-affinity) share ONE file system.
+# Write from pod A, read from pod B: that is what EBS (single node, single AZ) cannot do.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: efs-demo
+  namespace: cloudcart
+spec:
+  accessModes: [ReadWriteMany]
+  storageClassName: efs-ap
+  resources:
+    requests: {storage: 1Gi}          # required by the API, ignored by EFS (elastic capacity)
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: efs-demo
+  namespace: cloudcart
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: efs-demo}
+  template:
+    metadata:
+      labels: {app: efs-demo}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: topology.kubernetes.io/zone
+                labelSelector: {matchLabels: {app: efs-demo}}
+      containers:
+        - name: shell
+          image: public.ecr.aws/docker/library/busybox:1.37
+          command: ["sh", "-c", "echo hello from $(hostname) >> /shared/hello.txt; sleep 3600"]
+          securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+          resources: {requests: {cpu: 10m, memory: 16Mi}, limits: {memory: 32Mi}}
+          volumeMounts: [{name: shared, mountPath: /shared}]
+      volumes:
+        - name: shared
+          persistentVolumeClaim: {claimName: efs-demo}

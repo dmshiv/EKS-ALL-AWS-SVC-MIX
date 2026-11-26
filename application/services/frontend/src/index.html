@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CloudCart</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header><h1>CloudCart</h1><span>EKS learning platform</span></header>
+  <main>
+    <section>
+      <h2>Products</h2>
+      <p id="source" class="muted"></p>
+      <ul id="products"></ul>
+    </section>
+    <section>
+      <h2>Place an order</h2>
+      <form id="order-form">
+        <label>Customer <input id="customer" required maxlength="100" value="demo-user"></label>
+        <label>Product <select id="product"></select></label>
+        <label>Quantity <input id="qty" type="number" min="1" max="100" value="1"></label>
+        <button type="submit">Order</button>
+      </form>
+      <pre id="result"></pre>
+    </section>
+  </main>
+  <footer class="muted">build __VERSION__</footer>
+  <script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,28 @@
+# LOAD GENERATOR for the HPA experiment (USER_GUIDE section 32): hammers the frontend until the HPA scales it out.
+#   kubectl apply -f kubernetes/autoscaling/load-test.yaml
+#   kubectl -n cloudcart get hpa -w            # TARGETS rises above 60%, REPLICAS grows
+#   kubectl -n cloudcart get pods -w           # new pods; some may go Pending -> Karpenter adds a node
+#   kubectl delete -f kubernetes/autoscaling/load-test.yaml   # remove load; watch the scale-down and node consolidation
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: load-test
+  namespace: cloudcart
+spec:
+  replicas: 3
+  selector:
+    matchLabels: {app: load-test}
+  template:
+    metadata:
+      labels: {app: load-test}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: hey
+          image: public.ecr.aws/docker/library/busybox:1.37
+          command: ["sh", "-c", "while true; do wget -q -O /dev/null http://frontend.cloudcart.svc.cluster.local/ ; wget -q -O /dev/null http://frontend.cloudcart.svc.cluster.local/api/products; done"]
+          securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+          resources: {requests: {cpu: 50m, memory: 16Mi}, limits: {memory: 32Mi}}

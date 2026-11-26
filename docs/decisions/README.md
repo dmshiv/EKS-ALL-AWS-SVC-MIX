@@ -1,0 +1,18 @@
+# Architecture decision records
+
+- [Why EKS?](adr-why-eks.md)
+- [Why Pod Identity?](adr-why-pod-identity.md)
+- [Why ECR?](adr-why-ecr.md)
+- [Why RDS?](adr-why-rds.md)
+- [RDS vs Aurora](adr-rds-vs-aurora.md)
+- [Why DynamoDB?](adr-why-dynamodb.md)
+- [Why SQS?](adr-why-sqs.md)
+- [Why EventBridge?](adr-why-eventbridge.md)
+- [Why ALB?](adr-why-alb.md)
+- [Why CloudFront?](adr-why-cloudfront.md)
+- [Why Karpenter?](adr-why-karpenter.md)
+- [Why EBS?](adr-why-ebs.md)
+- [Why EFS?](adr-why-efs.md)
+- [Why private subnets?](adr-why-private-subnets.md)
+- [Why NAT?](adr-why-nat.md)
+- [Why VPC endpoints?](adr-why-vpc-endpoints.md)

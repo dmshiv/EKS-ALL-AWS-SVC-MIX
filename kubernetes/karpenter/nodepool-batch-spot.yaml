@@ -1,0 +1,28 @@
+# BATCH-SPOT pool: Spot ONLY and TAINTED, so only pods that tolerate cloudcart.io/workload=batch land here (the worker does).
+# Taints keep fragile pods off interruptible capacity; Spot is ~70-90% cheaper but can be reclaimed with 2 minutes' notice.
+# Interruption flow: EC2 spot warning -> EventBridge -> SQS (terraform/12-karpenter) -> Karpenter cordons + drains the node, launches a replacement.
+# The worker is safe on Spot because SQS redelivers any message that was in flight (idempotent processing, visibility timeout).
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: batch-spot
+spec:
+  template:
+    metadata:
+      labels: {cloudcart.io/node-role: batch-spot}
+    spec:
+      nodeClassRef: {group: karpenter.k8s.aws, kind: EC2NodeClass, name: default}
+      taints:
+        - {key: cloudcart.io/workload, value: batch, effect: NoSchedule}
+      requirements:
+        - {key: karpenter.sh/capacity-type, operator: In, values: [spot]}
+        - {key: kubernetes.io/arch, operator: In, values: [amd64]}
+        - {key: karpenter.k8s.aws/instance-category, operator: In, values: [c, m, r]}
+        - {key: karpenter.k8s.aws/instance-generation, operator: Gt, values: ["4"]}
+        - {key: karpenter.k8s.aws/instance-size, operator: In, values: [large, xlarge]}
+      expireAfter: 720h
+  limits:
+    cpu: "16"
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 1m

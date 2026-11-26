@@ -1,0 +1,131 @@
+{{- range $name, $svc := .Values.services }}
+{{- if $svc.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "cloudcart.labels" (dict "name" $name "root" $) | nindent 4 }}
+spec:
+  replicas: {{ $svc.replicas }}
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxUnavailable: {{ if $svc.spotFriendly }}1{{ else }}0{{ end }}, maxSurge: 1}
+  selector:
+    matchLabels:
+      {{- include "cloudcart.selector" $name | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "cloudcart.labels" (dict "name" $name "root" $) | nindent 8 }}
+        {{- with $svc.extraPodLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ $name }}
+      terminationGracePeriodSeconds: {{ $svc.terminationGracePeriodSeconds | default 30 }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: {{ $svc.uid }}
+        runAsGroup: {{ $svc.uid }}
+        seccompProfile: {type: RuntimeDefault}
+      {{- if $svc.spotFriendly }}
+      # Spot friendly: tolerate the tainted batch-spot pool and PREFER it (still schedulable elsewhere if the pool does not exist).
+      tolerations:
+        - {key: cloudcart.io/workload, operator: Equal, value: batch, effect: NoSchedule}
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - {key: cloudcart.io/node-role, operator: In, values: [batch-spot]}
+      {{- end }}
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "cloudcart.selector" $name | nindent 14 }}
+      containers:
+        - name: app
+          image: {{ include "cloudcart.image" (dict "root" $ "svc" $svc) }}
+          imagePullPolicy: IfNotPresent
+          ports: [{name: http, containerPort: {{ $svc.port }}}]
+          {{- if $svc.awsAccess }}
+          envFrom: [{configMapRef: {name: cloudcart-config}}]
+          {{- end }}
+          resources:
+            {{- toYaml $svc.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            {{- range $i, $path := $svc.writablePaths }}
+            - {name: scratch-{{ $i }}, mountPath: {{ $path }}}
+            {{- end }}
+          {{- if $svc.preStopSleep }}
+          lifecycle:
+            preStop:
+              exec: {command: ["sleep", "{{ $svc.preStopSleep }}"]}
+          {{- end }}
+          startupProbe: {httpGet: {path: {{ $svc.probes.liveness }}, port: http}, periodSeconds: 3, failureThreshold: 30}
+          livenessProbe: {httpGet: {path: {{ $svc.probes.liveness }}, port: http}, periodSeconds: 10, timeoutSeconds: 2, failureThreshold: 3}
+          readinessProbe: {httpGet: {path: {{ $svc.probes.readiness }}, port: http}, periodSeconds: 5, timeoutSeconds: 3, failureThreshold: 2}
+      volumes:
+        {{- range $i, $path := $svc.writablePaths }}
+        - {name: scratch-{{ $i }}, emptyDir: {}}
+        {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    {{- include "cloudcart.labels" (dict "name" $name "root" $) | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "cloudcart.selector" $name | nindent 4 }}
+  ports:
+    - {name: http, port: {{ $svc.servicePort }}, targetPort: http}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ $name }}
+  namespace: {{ $.Release.Namespace }}
+spec:
+  {{- if $svc.spotFriendly }}
+  maxUnavailable: 1
+  {{- else }}
+  minAvailable: 1
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "cloudcart.selector" $name | nindent 6 }}
+{{- if and $svc.hpa $svc.hpa.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ $name }}
+  namespace: {{ $.Release.Namespace }}
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: {{ $name }}}
+  minReplicas: {{ $svc.hpa.min }}
+  maxReplicas: {{ $svc.hpa.max }}
+  metrics:
+    - type: Resource
+      resource: {name: cpu, target: {type: Utilization, averageUtilization: {{ $svc.hpa.cpu }}}}
+  behavior:
+    scaleDown: {stabilizationWindowSeconds: 120}
+{{- end }}
+{{- end }}
+{{- end }}

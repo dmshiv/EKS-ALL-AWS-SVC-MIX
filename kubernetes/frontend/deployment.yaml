@@ -1,0 +1,134 @@
+# WHICH version of the Kubernetes API "language" this file speaks.
+# WHY: "apps/v1" is the stable version for running applications.
+apiVersion: apps/v1
+# WHAT this file creates: a Deployment = a manager that keeps your app
+# running (right number of copies, restarts crashes, rolls out updates safely).
+kind: Deployment
+# INFO ABOUT the Deployment itself: its name + where it lives.
+metadata:
+  # The Deployment's name — how you refer to it (e.g. kubectl get deploy frontend).
+  name: frontend
+  # The "room" (namespace) it lives in — keeps cloudcart's stuff separate
+  # from other apps in the same cluster. PURPOSE: organization & isolation.
+  namespace: cloudcart
+  # Sticky-note labels for finding/grouping this Deployment later
+  # (dashboards, queries, cleanup). PURPOSE: identification.
+  labels: {app.kubernetes.io/name: frontend, app.kubernetes.io/part-of: cloudcart}
+# THE PLAN: what the running app should look like.
+spec:
+  # Run 2 copies (pods). WHY: if one dies, the other keeps serving customers.
+  # PURPOSE: high availability — no single point of failure.
+  replicas: 2
+  # Remember the last 5 versions. WHY: lets you ROLL BACK (undo) a bad release.
+  revisionHistoryLimit: 5
+  # HOW updates are rolled out when you release a new version.
+  strategy:
+    # RollingUpdate = replace old copies with new ones GRADUALLY, not all at
+    # once. WHY: the website never goes down during an update.
+    type: RollingUpdate
+    # maxUnavailable: 0 = never drop below 2 working copies while updating.
+    # maxSurge: 1      = may briefly run 1 extra copy (3 total) while swapping.
+    # WHY: capacity stays full while new versions start. PURPOSE: zero downtime.
+    rollingUpdate: {maxUnavailable: 0, maxSurge: 1}
+  # HOW the Deployment knows which pods belong to it: by this label.
+  # WHY: it must match the pod labels below, or it won't manage them.
+  selector:
+    matchLabels: {app.kubernetes.io/name: frontend}
+  # THE MOLD (cookie cutter) that every new copy/pod is created from.
+  template:
+    metadata:
+      # Labels stamped onto each pod — this is how the selector above
+      # recognizes "these pods are mine". PURPOSE: links pods to this Deployment.
+      labels: {app.kubernetes.io/name: frontend, app.kubernetes.io/part-of: cloudcart}
+    spec:
+      # The ID card the pod uses inside the cluster. WHY: this one has NO AWS
+      # powers on purpose — if attackers break in, they can't touch AWS.
+      serviceAccountName: frontend      # no Pod Identity association: this pod has NO AWS permissions (least privilege)
+      # On shutdown, give the pod 30 seconds to finish serving current visitors
+      # before force-killing it. WHY: no abruptly cut-off customers.
+      terminationGracePeriodSeconds: 30
+      # SECURITY RULES for all containers in this pod:
+      securityContext:
+        # Never run as the all-powerful "root" (admin) user.
+        # WHY: limits the damage if the app gets hacked (least privilege).
+        runAsNonRoot: true
+        # Run as low-power user 101 (nginx's unprivileged account).
+        runAsUser: 101                  # the nginx-unprivileged user
+        # The group that user belongs to — same purpose as runAsUser above.
+        runAsGroup: 101
+        # Restrict which low-level OS "system calls" the app may make, using
+        # the runtime's safe default list. WHY: blocks many exploit tricks.
+        seccompProfile: {type: RuntimeDefault}
+      # SPREADING RULE: try to put the 2 copies in DIFFERENT zones (separate
+      # data-center areas). WHY: one zone failing won't take the site down.
+      topologySpreadConstraints:
+        # Zones may differ by at most 1 pod — keeps them evenly balanced.
+        - maxSkew: 1
+          # The thing we spread across = availability zones.
+          topologyKey: topology.kubernetes.io/zone
+          # ScheduleAnyway = a preference, not a hard rule: if spreading is
+          # impossible, run anyway rather than not at all. WHY: availability first.
+          whenUnsatisfiable: ScheduleAnyway
+          # Apply this spreading only to pods wearing our frontend label.
+          labelSelector: {matchLabels: {app.kubernetes.io/name: frontend}}
+      # THE PROGRAMS to run — each in its own sealed "container" box.
+      containers:
+        # This container's nickname.
+        - name: app
+          # WHICH app to run: the frontend image from our private registry.
+          # ${...} = blanks filled in at deploy time (registry + version tag).
+          image: ${IMAGE_REGISTRY}/cloudcart-frontend:${IMAGE_TAG}
+          # Only download the image if this machine doesn't have it yet.
+          # WHY: faster starts, less bandwidth.
+          imagePullPolicy: IfNotPresent
+          # The "door" the app listens on: port 8080, nicknamed "http" so
+          # other configs (probes, services) can refer to it by name.
+          ports: [{name: http, containerPort: 8080}]
+          # COMPUTER ALLOWANCE for this container:
+          resources:
+            # Guaranteed minimum: 5% of one CPU core + 32Mi of RAM.
+            # WHY: Kubernetes reserves this so the app always has enough to run.
+            requests: {cpu: 50m, memory: 32Mi}
+            # Hard ceiling: never more than 96Mi of RAM (no CPU cap on purpose).
+            # WHY: stops one greedy/buggy copy from starving the others.
+            limits: {memory: 96Mi}
+          # EXTRA SECURITY RULES just for this container:
+          securityContext:
+            # It can NEVER gain more privileges than it started with.
+            # WHY: blocks a common hacker escalation trick.
+            allowPrivilegeEscalation: false
+            # The app's own filesystem is sealed (read-only).
+            # WHY: malware can't rewrite the app or plant files.
+            readOnlyRootFilesystem: true
+            # Drop ALL special Linux powers. WHY: bare minimum only.
+            capabilities: {drop: [ALL]}
+          # nginx needs writable scratch dirs when the root filesystem is read-only.
+          # (Because of the seal above, we hand it two writable folders below.)
+          volumeMounts:
+            # Throwaway temp files go here.
+            - {name: tmp, mountPath: /tmp}
+            # nginx's cache (temporary web data) goes here.
+            - {name: cache, mountPath: /var/cache/nginx}
+          # ALB DEREGISTRATION RACE: when a pod is deleted the ALB keeps sending traffic for a few seconds. Sleeping in preStop lets the
+          # target deregister first, so rollouts do not produce 502s.
+          # (Plain words: before dying, the copy waits 10s doing nothing so the
+          # load balancer stops sending visitors to it first — no error pages.)
+          lifecycle:
+            preStop:
+              exec: {command: ["sleep", "10"]}
+          # LIVENESS = "are you alive?" Kubernetes visits /health every 10s
+          # (2s per try); 3 failures in a row = app is frozen → auto-RESTART it.
+          # WHY: self-healing — no human needed at 3 AM.
+          livenessProbe: {httpGet: {path: /health, port: http}, periodSeconds: 10, timeoutSeconds: 2, failureThreshold: 3}
+          # READINESS = "ready for customers?" Kubernetes visits /ready every 5s;
+          # until it answers OK (or after 2 failures), NO traffic is sent here.
+          # WHY: visitors never hit a copy that's still warming up.
+          readinessProbe: {httpGet: {path: /ready, port: http}, periodSeconds: 5, timeoutSeconds: 2, failureThreshold: 2}
+      # THE STORAGE behind the two scratch folders above.
+      # emptyDir = a temporary folder that lives and dies with the pod.
+      # WHY: fine for caches/temp files — nothing here needs to survive.
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: cache
+          emptyDir: {}

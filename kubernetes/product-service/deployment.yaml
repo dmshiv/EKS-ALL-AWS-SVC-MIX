@@ -1,0 +1,62 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: product-service
+  namespace: cloudcart
+  labels: {app.kubernetes.io/name: product-service, app.kubernetes.io/part-of: cloudcart}
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxUnavailable: 0, maxSurge: 1}   # never drop below desired capacity during a rollout
+  selector:
+    matchLabels: {app.kubernetes.io/name: product-service}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: product-service, app.kubernetes.io/part-of: cloudcart}
+    spec:
+      # SA name == the Pod Identity association created in terraform/08-pod-identity => temporary AWS credentials, no keys.
+      serviceAccountName: product-service
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      # Spread across AZs and nodes: one AZ or node failure never takes all replicas.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector: {matchLabels: {app.kubernetes.io/name: product-service}}
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector: {matchLabels: {app.kubernetes.io/name: product-service}}
+      containers:
+        - name: app
+          # IMMUTABLE tag (ECR tag immutability): the same bytes on every node, rollback = previous tag. Never :latest.
+          image: ${IMAGE_REGISTRY}/cloudcart-product-service:${IMAGE_TAG}
+          imagePullPolicy: IfNotPresent
+          ports: [{name: http, containerPort: 8080}]
+          envFrom: [{configMapRef: {name: cloudcart-config}}]
+          # REQUESTS drive scheduling AND the HPA utilisation percentage; without them autoscaling cannot work.
+          resources:
+            requests: {cpu: 100m, memory: 128Mi}
+            limits: {memory: 256Mi}      # memory limit = OOMKilled when exceeded (USER_GUIDE failure test); no CPU limit avoids throttling
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts: [{name: tmp, mountPath: /tmp}]
+          # startupProbe gives slow starts (SSM load with retries) time without weakening liveness.
+          startupProbe: {httpGet: {path: /health, port: http}, periodSeconds: 3, failureThreshold: 30}
+          # LIVENESS: restart only if the process is wedged. It must NOT depend on DynamoDB/Redis.
+          livenessProbe: {httpGet: {path: /health, port: http}, periodSeconds: 10, timeoutSeconds: 2, failureThreshold: 3}
+          # READINESS: remove the pod from the Service/ALB when it cannot serve (e.g. IAM or network to DynamoDB broken).
+          readinessProbe: {httpGet: {path: /ready, port: http}, periodSeconds: 5, timeoutSeconds: 3, failureThreshold: 2}
+      volumes:
+        - name: tmp
+          emptyDir: {}

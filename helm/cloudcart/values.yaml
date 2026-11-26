@@ -1,0 +1,78 @@
+# Values for the CloudCart chart.
+#
+# `global.*` comes from terraform/99-capstone (output helm_values) so no AWS ID is copied by hand:
+#     scripts/deploy-app.sh  ->  terraform output -json helm_values  ->  helm upgrade --install -f <that json> ...
+# The per-service settings below are application decisions and live in Git with the chart.
+
+global:
+  region: us-east-1
+  clusterName: cloudcart-lab
+  ssmPrefix: /cloudcart/lab           # services read their endpoints from Parameter Store under this prefix
+  vpcCidr: 10.0.0.0/16                # NetworkPolicy ipBlock for the load balancers
+  imageRegistry: ""                   # <account>.dkr.ecr.<region>.amazonaws.com
+  imageTag: v1.0.0                    # IMMUTABLE tag (never "latest")
+  domain: ""                          # cloudcart.<domain>   (empty = no DNS/TLS: the ALB is HTTP on its generated hostname)
+  originDomain: ""                    # origin.<domain>      (the ALB host behind CloudFront)
+  albCertificateArn: ""
+  wafAclArn: ""
+  accessLogsBucket: ""
+
+ingress:
+  enabled: true
+
+networkPolicies:
+  enabled: true
+
+services:
+  frontend:
+    enabled: true
+    image: cloudcart-frontend
+    port: 8080
+    servicePort: 80
+    uid: 101                          # nginx-unprivileged
+    awsAccess: false                  # no Pod Identity association: no AWS permissions
+    replicas: 2
+    resources: {requests: {cpu: 50m, memory: 32Mi}, limits: {memory: 96Mi}}
+    hpa: {enabled: true, min: 2, max: 8, cpu: 60}
+    preStopSleep: 10
+    writablePaths: [/tmp, /var/cache/nginx]
+    probes: {liveness: /health, readiness: /ready}
+  product-service:
+    enabled: true
+    image: cloudcart-product-service
+    port: 8080
+    servicePort: 8080
+    uid: 10001
+    awsAccess: true                   # ServiceAccount name == the Pod Identity association (terraform/08-pod-identity)
+    replicas: 2
+    resources: {requests: {cpu: 100m, memory: 128Mi}, limits: {memory: 256Mi}}
+    hpa: {enabled: true, min: 2, max: 10, cpu: 60}
+    writablePaths: [/tmp]
+    probes: {liveness: /health, readiness: /ready}
+  order-service:
+    enabled: true
+    image: cloudcart-order-service
+    port: 8080
+    servicePort: 8080
+    uid: 10001
+    awsAccess: true
+    replicas: 2
+    resources: {requests: {cpu: 100m, memory: 160Mi}, limits: {memory: 320Mi}}
+    hpa: {enabled: true, min: 2, max: 10, cpu: 60}
+    writablePaths: [/tmp]
+    extraPodLabels: {cloudcart.io/db-access: "true"}   # selected by the SecurityGroupPolicy (terraform/43)
+    probes: {liveness: /health, readiness: /ready}
+  worker:
+    enabled: true
+    image: cloudcart-worker
+    port: 8080
+    servicePort: 8080
+    uid: 10001
+    awsAccess: true
+    replicas: 2
+    terminationGracePeriodSeconds: 45
+    resources: {requests: {cpu: 100m, memory: 128Mi}, limits: {memory: 256Mi}}
+    hpa: {enabled: true, min: 2, max: 12, cpu: 70}
+    writablePaths: [/tmp]
+    spotFriendly: true                # tolerates + prefers the tainted Karpenter batch-spot pool
+    probes: {liveness: /health, readiness: /ready}

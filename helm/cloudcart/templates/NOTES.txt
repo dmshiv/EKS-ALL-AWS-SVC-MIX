@@ -1,0 +1,10 @@
+CloudCart {{ .Chart.AppVersion }} deployed to namespace {{ .Release.Namespace }} with image tag {{ .Values.global.imageTag }}.
+
+Check:
+  kubectl -n {{ .Release.Namespace }} get deploy,pods,svc,hpa,ingress
+  kubectl -n {{ .Release.Namespace }} rollout status deploy/product-service
+
+Load balancer hostname (wait a few minutes for the ALB to become active):
+  kubectl -n {{ .Release.Namespace }} get ingress cloudcart -o jsonpath='{.status.loadBalancer.ingress[0].hostname}{"\n"}'
+
+Rollback to the previous release:  helm -n {{ .Release.Namespace }} rollback cloudcart

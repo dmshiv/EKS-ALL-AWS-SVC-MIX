@@ -1,0 +1,19 @@
+# EBS StorageClass (terraform/13-ebs installs the CSI driver; StorageClasses are Kubernetes objects so they live here).
+#   WaitForFirstConsumer : create the volume only after the pod is scheduled, in the SAME AZ as the pod (EBS volumes are single-AZ).
+#   encrypted + kmsKeyId : volumes are encrypted with the data CMK from terraform/16-kms (the CSI role has the KMS grants, see 13-ebs).
+#   allowVolumeExpansion : grow a PVC online by editing spec.resources.requests.storage.
+#   reclaimPolicy Delete : deleting the PVC deletes the volume (LAB). PRODUCTION databases: Retain + snapshots.
+# Render with scripts/render-k8s.sh (fills ${KMS_KEY_ARN}).
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: gp3-encrypted
+provisioner: ebs.csi.aws.com
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true
+reclaimPolicy: Delete
+parameters:
+  type: gp3
+  encrypted: "true"
+  kmsKeyId: ${KMS_KEY_ARN}
+  fsType: ext4

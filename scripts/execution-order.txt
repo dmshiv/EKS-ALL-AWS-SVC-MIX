@@ -1,0 +1,56 @@
+# Terraform apply order (topological, derived from the real remote-state dependencies; checked by scripts/check-wiring.py).
+# The folder NUMBER equals the apply order EXCEPT for one folder:
+#   16-kms is applied right after 03-security-groups, because 04-ecr, 06-eks, 13-ebs, 14-efs and 15-s3 encrypt with its keys.
+# Apply ONE folder at a time:  scripts/tf.sh <folder> plan  ->  review  ->  scripts/tf.sh <folder> apply  (verifies automatically).
+# Manual (kubectl/Helm) steps that sit between folders are marked with "#STEP" and are documented in docs/deployment/.
+00-bootstrap
+01-vpc
+02-vpc-endpoints
+03-security-groups
+16-kms
+04-ecr
+05-iam
+06-eks
+07-eks-access
+08-pod-identity
+09-irsa
+10-node-groups
+11-fargate
+12-karpenter
+#STEP kubectl apply -f kubernetes/namespaces/ and scripts/deploy-karpenter.sh (NodePools + EC2NodeClass)
+13-ebs
+14-efs
+15-s3
+17-secrets-manager
+18-parameter-store
+19-rds
+20-dynamodb
+21-elasticache
+22-sqs
+23-sns
+24-eventbridge
+25-lambda
+26-route53
+27-acm
+28-load-balancer-controller
+29-alb
+30-nlb
+31-vpc-lattice
+32-cloudfront
+33-waf
+34-cloudwatch
+35-container-insights
+36-cloudtrail
+37-guardduty
+38-security-hub
+39-config
+40-backup
+41-autoscaling
+42-network-policies
+43-security-groups-for-pods
+44-ipv6
+45-prefix-delegation
+46-cicd
+47-gitops
+#STEP scripts/build-push.sh (images -> ECR) then scripts/deploy-app.sh (Helm) then ALB/Ingress creates the load balancer
+99-capstone

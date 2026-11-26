@@ -1,0 +1,48 @@
+# HORIZONTAL POD AUTOSCALERS (need metrics-server: terraform/41-autoscaling, and CPU REQUESTS on the pods: they are set in the Deployments).
+#   utilisation % = pod CPU usage / pod CPU REQUEST. 60% target on a 100m request = scale when pods average > 60m.
+#   scaleDown stabilisation 120s avoids flapping; scaleUp is immediate and may double pods per minute.
+# The scaling chain: load -> HPA adds pods -> pods Pending (no room) -> Karpenter adds a node (kubernetes/karpenter) -> pods scheduled.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: frontend
+  namespace: cloudcart
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: frontend}
+  minReplicas: 2
+  maxReplicas: 8
+  metrics:
+    - type: Resource
+      resource: {name: cpu, target: {type: Utilization, averageUtilization: 60}}
+  behavior:
+    scaleDown: {stabilizationWindowSeconds: 120}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: product-service
+  namespace: cloudcart
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: product-service}
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource: {name: cpu, target: {type: Utilization, averageUtilization: 60}}
+  behavior:
+    scaleDown: {stabilizationWindowSeconds: 120}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: order-service
+  namespace: cloudcart
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: order-service}
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource: {name: cpu, target: {type: Utilization, averageUtilization: 60}}
+  behavior:
+    scaleDown: {stabilizationWindowSeconds: 120}

@@ -1,0 +1,34 @@
+# WORKER SCALING. CPU is a poor signal for a queue consumer (an idle worker long-polling uses almost no CPU while the backlog grows).
+# The right signal is QUEUE DEPTH / message age. Options (docs/scaling):
+#   1. KEDA ScaledObject with the aws-sqs-queue scaler (scales on ApproximateNumberOfMessages), authenticated with Pod Identity.
+#   2. HPA with an external metric from CloudWatch (needs a metrics adapter).
+# This lab ships the simple CPU HPA so the cluster works out of the box, and a KEDA example (commented) for the queue-depth version.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: worker
+  namespace: cloudcart
+spec:
+  scaleTargetRef: {apiVersion: apps/v1, kind: Deployment, name: worker}
+  minReplicas: 2
+  maxReplicas: 12
+  metrics:
+    - type: Resource
+      resource: {name: cpu, target: {type: Utilization, averageUtilization: 70}}
+  behavior:
+    scaleDown: {stabilizationWindowSeconds: 300}
+# --- KEDA alternative (install KEDA first; do not run it together with the HPA above) --------------------------------------------
+# apiVersion: keda.sh/v1alpha1
+# kind: ScaledObject
+# metadata: {name: worker, namespace: cloudcart}
+# spec:
+#   scaleTargetRef: {name: worker}
+#   minReplicaCount: 1
+#   maxReplicaCount: 20
+#   triggers:
+#     - type: aws-sqs-queue
+#       metadata:
+#         queueURL: ${ORDERS_QUEUE_URL}
+#         queueLength: "5"            # target messages per replica
+#         awsRegion: ${AWS_REGION}
+#         identityOwner: operator     # KEDA operator's own identity (needs sqs:GetQueueAttributes)

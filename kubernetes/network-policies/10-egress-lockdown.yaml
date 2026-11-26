@@ -1,0 +1,175 @@
+# ==============================================================================================
+# WHAT IS THIS FILE? (the 10-second version)
+# File 01 controlled who may call IN. THIS file controls who may call OUT ("Egress" = outbound
+# traffic): what each app is allowed to TALK TO — other apps, the database, the cache, AWS services.
+# The logic: rule #1 SLAMS every outgoing door shut for every pod, and rules #2-#6 re-open only the
+# exact doors each app genuinely needs. Anything else a pod tries to reach simply times out.
+# ==============================================================================================
+#
+# EGRESS LOCKDOWN (LAB EXERCISE, not applied by default): deny all outbound traffic, then allow only what each workload needs.
+# (Plain words: this is a hands-on exercise you apply yourself when studying — it is NOT switched on
+#  by default, because it is strict enough to break things if a dependency was forgotten.)
+#
+# Why egress matters: a compromised pod cannot exfiltrate data or reach a database it should not, even if IAM and security groups were too
+# permissive. Cost of the control: you must know every dependency. Mistakes look like timeouts (see USER_GUIDE section 27).
+# (Plain words: if a hacker breaks into one app, these rules mean they still can't phone home with
+#  stolen data or wander into the database — this is a SECOND safety net behind IAM and the AWS
+#  firewalls (security groups). The price: you must list every single thing each app talks to.
+#  If you forget one, the symptom is mysterious TIMEOUTS, not a clear "blocked" error.)
+#
+# WHAT NETWORKPOLICY CANNOT DO HERE: it matches IPs/CIDRs/labels, not DNS names. AWS APIs (STS, SSM, S3, SQS...) are reached over 443 via VPC
+# endpoints or NAT, so "allow tcp/443 to the VPC and internet" is the practical rule; fine-grained control of WHICH AWS API is IAM + endpoint policies.
+# (Plain words: this firewall only understands IP addresses and labels — NOT names like "s3.amazonaws.com".
+#  All the AWS services sit behind secure web addresses (port 443), and from here they all look the same:
+#  "443 to somewhere". So the rule below is unavoidably "may call 443 anywhere". Deciding WHICH AWS
+#  service each app may actually use is done by a different tool: IAM permissions + endpoint policies.)
+# Render with scripts/render-k8s.sh (fills ${VPC_CIDR}).
+# (${VPC_CIDR} is a blank the render script fills with your own network's IP range.)
+
+# ---- RULE 1: slam every outgoing door shut, for EVERY pod ---------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  # The name says it all.
+  name: default-deny-egress
+  namespace: cloudcart
+spec:
+  # podSelector with EMPTY braces {} = "select EVERY pod in this namespace" (not "none"!).
+  podSelector: {}
+  # Egress = outgoing traffic. There is NO "egress:" list here at all — meaning: allow NOTHING out.
+  policyTypes: [Egress]
+---
+# DNS to CoreDNS, for every pod. Without this nothing resolves (the first thing that breaks after a default-deny egress).
+# (Plain words: DNS is the cluster's PHONE BOOK — it turns names like "product-service" into IP
+#  addresses. It's the very first thing that breaks after rule #1, so it's the first door we re-open.
+#  CoreDNS = the cluster's built-in phone-book service, which lives in the "kube-system" room.)
+
+# ---- RULE 2: every pod may use the phone book (DNS) ----------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: cloudcart
+spec:
+  # Every pod gets this permission.
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    # TO whom: pods labelled "kube-dns" that live in the "kube-system" namespace.
+    # WHY two selectors together (namespaceSelector + podSelector): "the DNS pods, in the system room"
+    # — one precise address instead of trusting any pod anywhere with that label.
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: kube-system}
+          podSelector:
+            matchLabels: {k8s-app: kube-dns}
+      # ON which door: port 53, the worldwide standard DNS port, in both flavours it uses
+      # (UDP for normal quick lookups, TCP for big answers).
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+---
+# AWS APIs over HTTPS (Pod Identity agent 169.254.170.23:80 is link-local on the node: allowed separately below).
+# (Plain words: this rule lets the three backend apps call AWS services — all of which answer on
+#  port 443, the standard secure-web port.)
+
+# ---- RULE 3: the backend apps may call AWS services ----------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-aws-apis-egress
+  namespace: cloudcart
+spec:
+  # WHO gets this permission: only the three apps that genuinely use AWS
+  # (product-service, order-service, worker). The frontend does NOT — it needs no AWS access at all.
+  podSelector:
+    matchExpressions:
+      - {key: app.kubernetes.io/name, operator: In, values: [product-service, order-service, worker]}
+  policyTypes: [Egress]
+  egress:
+    # DOOR 1: secure web (port 443) to anywhere — this is how every AWS API is reached.
+    # (As the header explains, it can't be narrowed by name; IAM decides what they may actually DO.)
+    - to:
+        - ipBlock: {cidr: 0.0.0.0/0}
+      ports:
+        - {protocol: TCP, port: 443}
+    # EKS Pod Identity Agent: credentials endpoint 169.254.170.23 (HTTP). Forget this rule and every AWS call fails with NoCredentialsError.
+    # (Plain words: DOOR 2 is a tiny local "badge office" (169.254.170.23, a special on-this-computer-only
+    #  address) where apps pick up their temporary AWS ID badge before calling AWS. It's plain HTTP
+    #  (port 80) but safe because the address only exists on the local server. If you forget this door,
+    #  apps can't get their badge and every AWS call fails with "NoCredentialsError".)
+    - to:
+        - ipBlock: {cidr: 169.254.170.23/32}
+      ports:
+        - {protocol: TCP, port: 80}
+---
+# order-service and worker -> RDS (inside the VPC only).
+# (Plain words: these two apps may talk to the PostgreSQL database. RDS = AWS's managed database service.)
+
+# ---- RULE 4: the order apps may reach the database -----------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-postgres-egress
+  namespace: cloudcart
+spec:
+  # Only order-service and worker need the database. product-service does NOT — so it isn't listed.
+  podSelector:
+    matchExpressions:
+      - {key: app.kubernetes.io/name, operator: In, values: [order-service, worker]}
+  policyTypes: [Egress]
+  egress:
+    # TO where: only IP addresses inside our own network (the database lives there) — never the internet.
+    - to:
+        - ipBlock: {cidr: ${VPC_CIDR}}
+      # ON which door: 5432, the standard PostgreSQL database port.
+      ports:
+        - {protocol: TCP, port: 5432}
+---
+# product-service -> ElastiCache.
+# (Plain words: product-service may talk to the Redis cache — AWS's "ElastiCache" service — where it
+#  keeps hot product data for speed.)
+
+# ---- RULE 5: product-service may reach the Redis cache -------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-redis-egress
+  namespace: cloudcart
+spec:
+  # Only product-service gets this door.
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: product-service}
+  policyTypes: [Egress]
+  egress:
+    # TO where: inside our own network only.
+    - to:
+        - ipBlock: {cidr: ${VPC_CIDR}}
+      # ON which door: 6379, the standard Redis port.
+      ports:
+        - {protocol: TCP, port: 6379}
+---
+# frontend (nginx) -> product-service / order-service.
+# (Plain words: the frontend's only job is to show pages and forward requests to the two APIs —
+#  so that's ALL it may reach. It cannot touch the database, the cache, or AWS directly.)
+
+# ---- RULE 6: the frontend may call ONLY the two APIs ----------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-frontend-egress
+  namespace: cloudcart
+spec:
+  # This rule applies to the frontend pods.
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: frontend}
+  policyTypes: [Egress]
+  egress:
+    # TO whom: pods labelled as either of the two APIs (matched by label — real pods, real labels).
+    - to:
+        - podSelector:
+            matchExpressions:
+              - {key: app.kubernetes.io/name, operator: In, values: [product-service, order-service]}
+      # ON which door: the APIs' port 8080.
+      ports:
+        - {protocol: TCP, port: 8080}

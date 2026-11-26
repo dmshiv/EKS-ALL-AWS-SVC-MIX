@@ -1,0 +1,87 @@
+# ==============================================================================================
+# WHAT IS THIS FILE? (the 10-second version)
+# This is a TEST / EXPERIMENT app, not part of the real shop.
+# Remember Karpenter (from ec2nodeclass.yaml)? It's the robot that automatically RENTS a new
+# AWS server when apps need more room. This file exists to PROVE that robot works:
+# you deliberately ask for more copies than the cluster can fit, watch Karpenter rent a new
+# server in minutes, then shrink back and watch it return the server so you stop paying for it.
+# The app itself does NOTHING (it's the famous "pause" image) — it just reserves a seat.
+# ==============================================================================================
+#
+# KARPENTER EXPERIMENT (USER_GUIDE section 11): make pods Pending on purpose and watch a node appear.
+#   1. kubectl apply -f kubernetes/karpenter/inflate.yaml     (replicas: 0 -> then scale)
+#   2. kubectl -n cloudcart scale deploy/inflate --replicas=12  -> pods Pending ("Insufficient cpu")
+#   3. kubectl -n kube-system logs deploy/karpenter -f          -> "found provisionable pod(s)", "launched nodeclaim", instance type chosen
+#   4. kubectl get nodeclaims,nodes -L karpenter.sh/capacity-type,node.kubernetes.io/instance-type
+#   5. kubectl -n cloudcart scale deploy/inflate --replicas=0  -> after ~1 minute consolidation removes the empty node
+# (Plain words for the steps above:
+#   1. Apply this file — it starts with ZERO copies, so nothing happens yet.
+#   2. Scale up to 12 copies. Each copy asks for a whole CPU, and the existing servers don't
+#      have 12 free CPUs — so the copies sit in "Pending" (waiting for a seat).
+#   3. Watch Karpenter's diary (logs): it notices the waiting copies and orders a new server.
+#   4. Watch the new server appear and join the cluster.
+#   5. Scale back to 0. The server is now empty, so about a minute later Karpenter returns it
+#      to AWS ("consolidation" = tidying up) and the billing stops.)
+# The pods use the pause image (no real work) but REQUEST 1 vCPU each: requests, not usage, decide scheduling and node sizing.
+# (Plain words: each copy is like a person at a restaurant who orders nothing but RESERVES a whole table.
+#  Kubernetes seats guests by the size of the reservation ("request"), not by what they actually eat —
+#  so 12 reservations = "sorry, no tables left" = Karpenter must build a bigger restaurant.)
+
+# WHICH "dialect" of the Kubernetes language this file speaks.
+# "apps/v1" = the standard stable version for running apps.
+apiVersion: apps/v1
+# WHAT this creates: a Deployment = the manager that keeps exactly the requested number
+# of copies alive (replace crashed ones, etc.).
+kind: Deployment
+# INFO ABOUT the Deployment itself.
+metadata:
+  # Its name: "inflate" — as in "inflate the cluster on demand". Used in the scale commands above.
+  name: inflate
+  # Lives in the "cloudcart" room (namespace) of the cluster, alongside the real shop apps.
+  namespace: cloudcart
+# THE PLAN.
+spec:
+  # Start with ZERO copies. WHY: this experiment should sit quietly doing nothing
+  # until YOU scale it up with the command in step 2. PURPOSE: costs nothing while idle.
+  replicas: 0
+  # HOW the Deployment recognizes its own copies: pods wearing the label "app: inflate".
+  selector:
+    matchLabels: {app: inflate}
+  # THE MOLD every copy (pod) is stamped from.
+  template:
+    metadata:
+      # Each pod gets this label — that's what the selector above looks for.
+      labels: {app: inflate}
+    spec:
+      # On shutdown, die INSTANTLY (0 seconds of polite finishing).
+      # WHY: the pause app serves nobody — there is nothing to finish. Makes the
+      # scale-down step fast, so the empty server gets returned sooner.
+      terminationGracePeriodSeconds: 0
+      # SECURITY RULES for the pod (good habits, even in a throwaway test):
+      securityContext:
+        # Never run as the all-powerful "root" admin user. WHY: least privilege.
+        runAsNonRoot: true
+        # Run as user number 10001 — a random high number guaranteed NOT to be root or any system account.
+        runAsUser: 10001
+        # Restrict low-level operating-system calls to the runtime's safe default list. WHY: blocks exploit tricks.
+        seccompProfile: {type: RuntimeDefault}
+      # WHERE these pods may run: ONLY on servers labeled "node-role: general" —
+      # that's the pool Karpenter manages. WHY: the existing "system" servers (that came with the cluster)
+      # don't wear this label, so these pods CANNOT squeeze onto them. If they could, they'd just use spare
+      # room and Karpenter would never need to rent a new server — ruining the whole experiment.
+      nodeSelector: {cloudcart.io/node-role: general}   # only the Karpenter "general" pool: forces provisioning instead of using the system nodes
+      # THE PROGRAM to run, in its sealed container box.
+      containers:
+        # The container's nickname.
+        - name: pause
+          # The "pause" image: a tiny program from AWS's public app store that does literally NOTHING
+          # but stay alive. Perfect for tests — it can't break and uses no real resources.
+          image: public.ecr.aws/eks-distro/kubernetes/pause:3.9
+          # More security lockdown: can never gain extra powers, and all special Linux powers removed.
+          securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+          # THE KEY TRICK of the experiment:
+          resources:
+            # Each copy RESERVES 1 whole CPU + 256Mi of RAM, even though it uses ~nothing.
+            # WHY: scheduling works on reservations. 12 copies × 1 CPU = 12 CPUs needed =
+            # more than the cluster has → pods wait ("Pending") → Karpenter rents a new server.
+            requests: {cpu: "1", memory: 256Mi}

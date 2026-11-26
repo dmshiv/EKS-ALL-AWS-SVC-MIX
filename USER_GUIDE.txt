@@ -1,0 +1,2475 @@
+CLOUDCART USER GUIDE  (hands-on test manual)
+===========================================================================
+Nothing in this repository is applied for you. You run every terraform apply yourself:
+  scripts/tf.sh <folder> plan  ->  review  ->  scripts/tf.sh <folder> apply
+Order of folders: scripts/execution-order.txt.  Explanations: terraform/<folder>/README.md and docs/.
+Placeholders in <angle brackets> come from `terraform output` or the AWS console. Test IDs are stable (use them in notes).
+Commands marked DESTRUCTIVE delete data. Controlled failures always end with a CLEANUP line that restores the system.
+Environment: run `source scripts/env.sh` in every new shell (sets account, region, state bucket, cluster name).
+===========================================================================
+
+
+===========================================================================
+1. PREREQUISITES
+===========================================================================
+
+TEST ID: 1.1
+TEST NAME: Tools installed
+
+PURPOSE:
+  Make sure every CLI needed exists before touching AWS.
+
+PREREQUISITES:
+  The folders that create what this test touches are applied and verified (scripts/execution-order.txt); kubectl points at the cluster.
+
+WHAT TO DO:
+  Run the commands in order. Read each output before the next one; do not move on after a failure.
+
+COMMANDS:
+  terraform version; aws --version; kubectl version --client; helm version --short; docker version --format '{{.Client.Version}}'; jq --version; envsubst --version | head -1
+    ^ Prints the Terraform version. Success: >= 1.11. Failure: older version or not found -> install/upgrade before anything else.
+
+EXPECTED RESULT:
+  Every command prints a version. Terraform >= 1.11 (S3 native state locking), kubectl within one minor of the cluster.
+
+WHAT SUCCESS LOOKS LIKE:
+  Every command prints a version. Terraform >= 1.11 (S3 native state locking), kubectl within one minor of the cluster.
+  Output missing but no error printed = the resource is still becoming ready: re-run the verify/describe command until it matches (never add a blind sleep).
+
+WHAT FAILURE LOOKS LIKE:
+  'command not found' or terraform < 1.11.
+
+TROUBLESHOOTING:
+  Install the missing tool; `terraform init` later fails with 'Unsupported argument use_lockfile' on older Terraform.
+  Method: SYMPTOM -> HYPOTHESIS -> DIAGNOSTIC COMMANDS -> EVIDENCE -> ROOT CAUSE -> FIX -> PREVENTION.
+
+ROOT CAUSE IF IT FAILS:
+  Most likely: Install the missing tool; `terraform init` later fails with 'Unsupported argument use_lockfile' on older Terraform.
+  Full method: docs/troubleshooting/playbooks.md.
+
+CLEANUP:
+  -
+
+WHAT THIS TEACHES:
+  The toolchain and why the minimum Terraform version matters (DynamoDB lock table is no longer needed).
+
+---------------------------------------------------------------------------
+
+
+===========================================================================
+2. AWS ACCOUNT VALIDATION
+===========================================================================
+
+TEST ID: 2.1
+TEST NAME: Credentials and account
+
+PURPOSE:
+  Prove you talk to the intended sandbox account with temporary credentials.
+
+PREREQUISITES:
+  The folders that create what this test touches are applied and verified (scripts/execution-order.txt); kubectl points at the cluster.
+
+WHAT TO DO:
+  Run the commands in order. Read each output before the next one; do not move on after a failure.
+
+COMMANDS:
+  aws sso login   # or your own method
+    ^ Opens the browser sign-in and caches temporary credentials. Success: "Successfully logged into...". Failure: wrong start URL/profile -> aws configure sso.
+  source scripts/env.sh
+    ^ Exports account, region, state bucket and cluster name for later commands. Success: values printed. Failure: "credentials invalid" -> re-authenticate first.
+  aws sts get-caller-identity
+    ^ Asks STS who you are. Success: Account/Arn of an assumed role (temporary credentials). Failure: InvalidClientTokenId/ExpiredToken -> credentials invalid; wrong account -> stop.
+
+EXPECTED RESULT:
+  env.sh prints account, region, state bucket name and cluster name. get-caller-identity shows an assumed-role ARN, not an IAM user.
+
+WHAT SUCCESS LOOKS LIKE:
+  env.sh prints account, region, state bucket name and cluster name. get-caller-identity shows an assumed-role ARN, not an IAM user.
+  Output missing but no error printed = the resource is still becoming ready: re-run the verify/describe command until it matches (never add a blind sleep).
+
+WHAT FAILURE LOOKS LIKE:
+  InvalidClientTokenId / ExpiredToken, or the account id is not your sandbox.
+
+TROUBLESHOOTING:
+  Re-authenticate. NEVER use root or long-lived access keys.
+  Method: SYMPTOM -> HYPOTHESIS -> DIAGNOSTIC COMMANDS -> EVIDENCE -> ROOT CAUSE -> FIX -> PREVENTION.
+
+ROOT CAUSE IF IT FAILS:
+  Most likely: Re-authenticate. NEVER use root or long-lived access keys.
+  Full method: docs/troubleshooting/playbooks.md.
+
+CLEANUP:
+  -
+
+WHAT THIS TEACHES:
+  STS: identity is always an assumed role with temporary credentials.
+
+---------------------------------------------------------------------------
+
+TEST ID: 2.2
+TEST NAME: Budget guardrail
+
+PURPOSE:
+  Cost alerts exist before anything expensive is created.
+
+PREREQUISITES:
+  The folders that create what this test touches are applied and verified (scripts/execution-order.txt); kubectl points at the cluster.
+
+WHAT TO DO:
+  Run the commands in order. Read each output before the next one; do not move on after a failure.
+
+COMMANDS:
+  set budget_email in envs/lab/00-bootstrap.tfvars, apply 00-bootstrap, then: aws budgets describe-budgets --account-id $ACCOUNT_ID
+
+EXPECTED RESULT:
+  A monthly budget with 50%/80%/100% notifications.
+
+WHAT SUCCESS LOOKS LIKE:
+  A monthly budget with 50%/80%/100% notifications.
+  Output missing but no error printed = the resource is still becoming ready: re-run the verify/describe command until it matches (never add a blind sleep).
+
+WHAT FAILURE LOOKS LIKE:
+  No budget listed.
+
+TROUBLESHOOTING:
+  budget_email was empty so the resource count is 0.
+  Method: SYMPTOM -> HYPOTHESIS -> DIAGNOSTIC COMMANDS -> EVIDENCE -> ROOT CAUSE -> FIX -> PREVENTION.
+
+ROOT CAUSE IF IT FAILS:
+  Most likely: budget_email was empty so the resource count is 0.
+  Full method: docs/troubleshooting/playbooks.md.
+
+CLEANUP:
+  -
+
+WHAT THIS TEACHES:
+  Cost control comes first.
+
+---------------------------------------------------------------------------
+
+
+===========================================================================
+3. TERRAFORM VALIDATION
+===========================================================================
+
+TEST ID: 3.1
+TEST NAME: Static checks (no AWS access)
+
+PURPOSE:
+  Syntax, formatting and cross-folder wiring are correct before any plan.
+
+PREREQUISITES:
+  The folders that create what this test touches are applied and verified (scripts/execution-order.txt); kubectl points at the cluster.
+
+WHAT TO DO:
+  Run the commands in order. Read each output before the next one; do not move on after a failure.
+
+COMMANDS:
+  python3 scripts/check-wiring.py
+    ^ Statically checks that every remote-state key, output and the apply order are consistent. Success: "wiring OK". Failure: names the missing output/folder -> fix the code before planning.
+  bash scripts/validate-all.sh
+    ^ Runs terraform init -backend=false and validate on every folder offline. Success: OK per folder. Failure: FAIL + Terraform error text -> fix that folder.
+  helm lint helm/cloudcart --set global.imageRegistry=example
+    ^ Lints the chart. Success: "0 chart(s) failed". Failure: template or values error with file/line -> fix the chart.
+
+EXPECTED RESULT:
+  wiring OK; every folder OK; helm lint 0 failed.
+
+WHAT SUCCESS LOOKS LIKE:
+  wiring OK; every folder OK; helm lint 0 failed.
+  Output missing but no error printed = the resource is still becoming ready: re-run the verify/describe command until it matches (never add a blind sleep).
+
+WHAT FAILURE LOOKS LIKE:
+  FAIL lines with the Terraform error, or a wiring problem naming the missing output.
+
+TROUBLESHOOTING:
+  Read the message: usually a renamed output or a folder applied in the wrong order in execution-order.txt.
+  Method: SYMPTOM -> HYPOTHESIS -> DIAGNOSTIC COMMANDS -> EVIDENCE -> ROOT CAUSE -> FIX -> PREVENTION.
+
+ROOT CAUSE IF IT FAILS:
+  Most likely: Read the message: usually a renamed output or a folder applied in the wrong order in execution-order.txt.
+  Full method: docs/troubleshooting/playbooks.md.
+
+CLEANUP:
+  -
+
+WHAT THIS TEACHES:
+  Dependencies are explicit; the dependency check is automated.
+
+---------------------------------------------------------------------------
+
+TEST ID: 3.2
+TEST NAME: Dependency gate
+
+PURPOSE:
+  A folder refuses to run before its upstream state exists.
+
+PREREQUISITES:
+  The folders that create what this test touches are applied and verified (scripts/execution-order.txt); kubectl points at the cluster.
+
+WHAT TO DO:
+  Run the commands in order. Read each output before the next one; do not move on after a failure.
+
+COMMANDS:
+  scripts/tf.sh 06-eks plan   # BEFORE applying 01/03/05/16
+    ^ Runs the dependency check, init, validate and plan for ONE folder. Success: a plan you can read and understand. Failure: dependency error (apply upstream first) or an AWS error -> read it, do not apply.
+
+EXPECTED RESULT:
+  ERROR: upstream state missing: s3://.../lab/01-vpc/terraform.tfstate -> apply 01-vpc first.
+
+WHAT SUCCESS LOOKS LIKE:
+  ERROR: upstream state missing: s3://.../lab/01-vpc/terraform.tfstate -> apply 01-vpc first.
+  Output missing but no error printed = the resource is still becoming ready: re-run the verify/describe command until it matches (never add a blind sleep).
+
+WHAT FAILURE LOOKS LIKE:
+  The plan starts without an error.
+
+TROUBLESHOOTING:
+  tf.sh derives upstream folders from the remote_state keys in the code; if it does not stop, the key naming is wrong.
+  Method: SYMPTOM -> HYPOTHESIS -> DIAGNOSTIC COMMANDS -> EVIDENCE -> ROOT CAUSE -> FIX -> PREVENTION.
+
+ROOT CAUSE IF IT FAILS:
+  Most likely: tf.sh derives upstream folders from the remote_state keys in the code; if it does not stop, the key naming is wrong.
+  Full method: docs/troubleshooting/playbooks.md.
+
+CLEANUP:
+  -
+
+WHAT THIS TEACHES:
+  Remote-state dependencies and strict ordering.
+
+---------------------------------------------------------------------------
+
+
+===========================================================================
+4. VPC TESTS
+===========================================================================
+
+TEST ID: 4.1
+TEST NAME: Network layout and isolation
+
+PURPOSE:
+  Subnets, NAT, tags and database isolation are real.
+
+PREREQUISITES:
+  The folders that create what this test touches are applied and verified (scripts/execution-order.txt); kubectl points at the cluster.
+
+WHAT TO DO:
+  Run the commands in order. Read each output before the next one; do not move on after a failure.
+
+COMMANDS:
+  scripts/verify.sh 01-vpc
+    ^ Queries AWS (not Terraform state) to prove the resources exist and are READY, polling instead of sleeping. Success: PASS lines. Failure: FAIL line naming the check -> read the AWS state it printed.
+  scripts/verify.sh 02-vpc-endpoints
+    ^ Queries AWS (not Terraform state) to prove the resources exist and are READY, polling instead of sleeping. Success: PASS lines. Failure: FAIL line naming the check -> read the AWS state it printed.
+
+EXPECTED RESULT:
+  PASS for VPC, DNS attributes, subnets per tier, discovery tags, NAT available, database route table has NO 0.0.0.0/0, endpoints available with private DNS.
+
+WHAT SUCCESS LOOKS LIKE:
+  PASS for VPC, DNS attributes, subnets per tier, discovery tags, NAT available, database route table has NO 0.0.0.0/0, endpoints available with private DNS.
+  Output missing but no error printed = the resource is still becoming ready: re-run the verify/describe command until it matches (never add a blind sleep).
+
+WHAT FAILURE LOOKS LIKE:
+  Any FAIL line.
+
+TROUBLESHOOTING:
+  NAT still pending -> the script waits (no sleep guess). Missing tags -> subnets will not be discovered by the ALB controller/Karpenter.
+  Method: SYMPTOM -> HYPOTHESIS -> DIAGNOSTIC COMMANDS -> EVIDENCE -> ROOT CAUSE -> FIX -> PREVENTION.
+
+ROOT CAUSE IF IT FAILS:
+  Most likely: NAT still pending -> the script waits (no sleep guess). Missing tags -> subnets will not be discovered by the ALB controller/Karpenter.
+  Full method: docs/troubleshooting/playbooks.md.
+
+CLEANUP:
+  -
+
+WHAT THIS TEACHES:
+  Public/private/isolated subnets, NAT, endpoints, packet flow.
+
+---------------------------------------------------------------------------
+
+TEST ID: 4.2
+TEST NAME: Controlled failure: remove the NAT route
+
+PURPOSE:
+  Learn how a missing route looks and how to find it.
+
+PREREQUISITES:
+  The folders that create what this test touches are applied and verified (scripts/execution-order.txt); kubectl points at the cluster.
+
+WHAT TO DO:
+  Run the commands in order. Read each output before the next one; do not move on after a failure.
+
+COMMANDS:
+  ROUTE_TABLE=<a private route table id>
+  aws ec2 delete-route --route-table-id $ROUTE_TABLE --destination-cidr-block 0.0.0.0/0
+  # later, from a pod: kubectl run t --rm -it --image=public.ecr.aws/docker/library/busybox:1.37 -- wget -T3 -qO- https://example.com
+  scripts/verify.sh 01-vpc
+    ^ Queries AWS (not Terraform state) to prove the resources exist and are READY, polling instead of sleeping. Success: PASS lines. Failure: FAIL line naming the check -> read the AWS state it printed.
+
+EXPECTED RESULT:
+  The pod cannot reach the internet and verify.sh reports the private route table without a NAT default route.
+
+WHAT SUCCESS LOOKS LIKE:
+  The pod cannot reach the internet and verify.sh reports the private route table without a NAT default route.
+
+WHAT FAILURE LOOKS LIKE:
+  Nothing breaks (you removed the wrong route).
+
+TROUBLESHOOTING:
+  SYMPTOM: egress timeouts. HYPOTHESIS: route/NAT. DIAGNOSTIC: aws ec2 describe-route-tables. ROOT CAUSE: missing 0.0.0.0/0 -> nat-*. FIX: scripts/tf.sh 01-vpc apply (Terraform restores it).
+  Method: SYMPTOM -> HYPOTHESIS -> DIAGNOSTIC COMMANDS -> EVIDENCE -> ROOT CAUSE -> FIX -> PREVENTION.
+
+ROOT CAUSE IF IT FAILS:
+  ROOT CAUSE: missing 0.0.0.0/0 -> nat-*.
+  Full method: docs/troubleshooting/playbooks.md.
+
+CLEANUP:
+  scripts/tf.sh 01-vpc apply
+
+WHAT THIS TEACHES:
+  Reading route tables; Terraform drift correction.
+
+---------------------------------------------------------------------------
+
+
+===========================================================================
+5. ECR TESTS
+===========================================================================
+
+TEST ID: 5.1
+TEST NAME: Build, scan, push, immutability
+
+PURPOSE:
+  Walk the full image lifecycle and prove tags are immutable.
+
+PREREQUISITES:
+  The folders that create what this test touches are applied and verified (scripts/execution-order.txt); kubectl points at the cluster.
+
+WHAT TO DO:
+  Run the commands in order. Read each output before the next one; do not move on after a failure.
+
+COMMANDS:
+  scripts/build-push.sh v1.0.0
+    ^ Builds the images, scans, tags with an immutable tag and pushes to ECR. Success: prints the tag and digest. Failure: denied/unauthorized -> ECR login or repository permissions.
+  aws ecr describe-images --repository-name cloudcart-product-service --query 'imageDetails[].[imageTags[0],imageScanStatus.status]'
+    ^ Reads ECR repository/image data. Success: the repository and your tag are listed. Failure: RepositoryNotFound / ImageNotFound -> not created or not pushed.
+  # push the SAME tag again:
+  docker push $(aws sts get-caller-identity --query Account --output text).dkr.ecr.$AWS_REGION.amazonaws.com/cloudcart-product-service:<tag>
+    ^ Local container tooling. Success: image built/scanned with no critical findings. Failure: build error or vulnerabilities -> read the output before pushing.
+
+EXPECTED RESULT:
+  Four images pushed with tag v1.0.0-<sha>; scan status COMPLETE; the second push fails with 'tag invalid: The image tag ... already exists'.
+
+WHAT SUCCESS LOOKS LIKE:
+  Four images pushed with tag v1.0.0-<sha>; scan status COMPLETE; the second push fails with 'tag invalid: The image tag ... already exists'.
+  Output missing but no error printed = the resource is still becoming ready: re-run the verify/describe command until it matches (never add a blind sleep).
+
+WHAT FAILURE LOOKS LIKE:
+  docker login fails, or the second push succeeds.
+
+TROUBLESHOOTING:
+  Login: credentials/region. Second push succeeds only if the repo was created MUTABLE.
+  Method: SYMPTOM -> HYPOTHESIS -> DIAGNOSTIC COMMANDS -> EVIDENCE -> ROOT CAUSE -> FIX -> PREVENTION.
+
+ROOT CAUSE IF IT FAILS:
+  Most likely: Login: credentials/region. Second push succeeds only if the repo was created MUTABLE.
+  Full method: docs/troubleshooting/playbooks.md.
+
+CLEANUP:
+  -
+
+WHAT THIS TEACHES:
+  Image lifecycle: build -> local store -> tag -> login -> push -> ECR; immutable tags; scanning.
+
+---------------------------------------------------------------------------
+
+TEST ID: 5.2
+TEST NAME: Controlled failure: ImagePullBackOff
+
+PURPOSE:
+  Diagnose an image pull error.
+
+PREREQUISITES:
+  The folders that create what this test touches are applied and verified (scripts/execution-order.txt); kubectl points at the cluster.
+
+WHAT TO DO:
+  Run the commands in order. Read each output before the next one; do not move on after a failure.
+
+COMMANDS:
+  kubectl run bad $NS --image=$(aws sts get-caller-identity --query Account --output text).dkr.ecr.$AWS_REGION.amazonaws.com/cloudcart-worker:does-not-exist
+    ^ Creates/updates objects. Success: "created"/"configured". Failure: validation or admission error text -> fix the manifest.
+  kubectl $NS describe pod bad | tail -15
+    ^ Shows state, conditions and EVENTS. Success: no Warning events. Failure: the Events section names the cause (FailedScheduling, FailedMount, Failed pull...).
+
+EXPECTED RESULT:
+  Events: 'Failed to pull image ... not found'; STATUS ErrImagePull then ImagePullBackOff.
+
+WHAT SUCCESS LOOKS LIKE:
+  Events: 'Failed to pull image ... not found'; STATUS ErrImagePull then ImagePullBackOff.
+
+WHAT FAILURE LOOKS LIKE:
+  Pod Running.
+
+TROUBLESHOOTING:
+  SYMPTOM ImagePullBackOff. HYPOTHESES: wrong tag; node role lacks ECR read ('no basic auth credentials'); no route to ECR/S3 ('i/o timeout'). EVIDENCE: the event text. ROOT CAUSE here: tag does not exist. PREVENTION: deploy only tags printed by build-push.sh.
+  Method: SYMPTOM -> HYPOTHESIS -> DIAGNOSTIC COMMANDS -> EVIDENCE -> ROOT CAUSE -> FIX -> PREVENTION.
+
+ROOT CAUSE IF IT FAILS:
+  ROOT CAUSE here: tag does not exist. PREVENTION: deploy only tags printed by build-push.sh.
+  Full method: docs/troubleshooting/playbooks.md.
+
+CLEANUP:
+  kubectl $NS delete pod bad
+
+WHAT THIS TEACHES:
+  Reading pull errors; node role vs pod identity for pulls.
+
+---------------------------------------------------------------------------
+
+
+===========================================================================
+6. EKS TESTS
+===========================================================================
+
+TEST ID: 6.1
+TEST NAME: Cluster and add-ons
+
+PURPOSE:
+  Control plane ACTIVE, nodes Ready, add-ons healthy.
+
+PREREQUISITES:
+  The folders that create what this test touches are applied and verified (scripts/execution-order.txt); kubectl points at the cluster.
+
+WHAT TO DO:
+  Run the commands in order. Read each output before the next one; do not move on after a failure.
+
+COMMANDS:
+  aws eks update-kubeconfig --name $CLUSTER_NAME --region $AWS_REGION
+    ^ Writes a kubectl context for the cluster. Success: "Added new context". Failure: AccessDenied -> your role lacks eks:DescribeCluster.
+  kubectl get --raw /readyz
+    ^ Reads or changes Kubernetes objects. Success: the expected objects/fields. Failure: NotFound/Forbidden -> namespace, name or RBAC/access entry.
+  kubectl get nodes -o wide
+    ^ Lists nodes. Success: all Ready. Failure: NotReady -> kubelet/CNI/IAM; none -> node group not created or cannot join.
+  kubectl get pods -A
+    ^ Lists pods. Success: Running and READY n/n. Failure: Pending, CrashLoopBackOff, ImagePullBackOff -> kubectl describe pod / logs.
+  aws eks list-addons --cluster-name $CLUSTER_NAME
+    ^ Queries the EKS API. Success: JSON with the expected resource. Failure: ResourceNotFound/AccessDenied -> wrong name/region or missing IAM.
+
+EXPECTED RESULT:
+  readyz ok; nodes Ready in 2 AZs+; CoreDNS, kube-proxy, aws-node, pod-identity-agent Running.
+
+WHAT SUCCESS LOOKS LIKE:
+  readyz ok; nodes Ready in 2 AZs+; CoreDNS, kube-proxy, aws-node, pod-identity-agent Running.
+  Output missing but no error printed = the resource is still becoming ready: re-run the verify/describe command until it matches (never add a blind sleep).
+
+WHAT FAILURE LOOKS LIKE:
+  Unauthorized, timeout, NotReady nodes.
+
+TROUBLESHOOTING:
+  Unauthorized = no access entry; timeout = endpoint CIDRs; NotReady = CNI/SG/route (kubectl describe node).
+  Method: SYMPTOM -> HYPOTHESIS -> DIAGNOSTIC COMMANDS -> EVIDENCE -> ROOT CAUSE -> FIX -> PREVENTION.
+
+ROOT CAUSE IF IT FAILS:
+  Most likely: Unauthorized = no access entry; timeout = endpoint CIDRs; NotReady = CNI/SG/route (kubectl describe node).
+  Full method: docs/troubleshooting/playbooks.md.
+
+CLEANUP:
+  -
+
+WHAT THIS TEACHES:
+  Cluster authentication path and add-ons.
+
+---------------------------------------------------------------------------
+
+
+===========================================================================
+7. IAM TESTS
+===========================================================================
+
+TEST ID: 7.1
+TEST NAME: Access entries: read-only vs developer
+
+PURPOSE:
+  See IAM authenticate and RBAC/access policy authorize.
+
+PREREQUISITES:
+  The folders that create what this test touches are applied and verified (scripts/execution-order.txt); kubectl points at the cluster.
+
+WHAT TO DO:
+  Run the commands in order. Read each output before the next one; do not move on after a failure.
+
+COMMANDS:
+  aws sts assume-role --role-arn $(terraform -chdir=terraform/07-eks-access output -raw readonly_role_arn) --role-session-name ro   # export the returned temporary credentials in a SUBSHELL
+  kubectl get pods -A
+    ^ Lists pods. Success: Running and READY n/n. Failure: Pending, CrashLoopBackOff, ImagePullBackOff -> kubectl describe pod / logs.
+  kubectl $NS delete deploy product-service
+    ^ Deletes objects (check the namespace first). Success: "deleted". Failure: stuck Terminating -> finalizer/volume detach.
+  kubectl auth can-i delete pods $NS
+    ^ Deletes objects (check the namespace first). Success: "deleted". Failure: stuck Terminating -> finalizer/volume detach.
+
+EXPECTED RESULT:
+  get works; delete is Forbidden; can-i says no. The developer role can edit only in cloudcart.
+
+WHAT SUCCESS LOOKS LIKE:
+  get works; delete is Forbidden; can-i says no. The developer role can edit only in cloudcart.
+  Output missing but no error printed = the resource is still becoming ready: re-run the verify/describe command until it matches (never add a blind sleep).
+
+WHAT FAILURE LOOKS LIKE:
+  401 Unauthorized or delete succeeds.
+
+TROUBLESHOOTING:
+  401 = access entry missing; delete succeeding = wrong access policy scope.
+  Method: SYMPTOM -> HYPOTHESIS -> DIAGNOSTIC COMMANDS -> EVIDENCE -> ROOT CAUSE -> FIX -> PREVENTION.
+
+ROOT CAUSE IF IT FAILS:
+  Most likely: 401 = access entry missing; delete succeeding = wrong access policy scope.
+  Full method: docs/troubleshooting/playbooks.md.
+
+CLEANUP:
+  Unset the temporary credentials.
+
+WHAT THIS TEACHES:
+  IAM vs access entry vs RBAC; 401 vs 403.
+
+---------------------------------------------------------------------------
+
+
+===========================================================================
+8. POD IDENTITY TESTS
+===========================================================================
+
+TEST ID: 8.1
+TEST NAME: Credentials without keys
+
+PURPOSE:
+  Prove a pod gets temporary credentials from its association.
+
+PREREQUISITES:
+  The folders that create what this test touches are applied and verified (scripts/execution-order.txt); kubectl points at the cluster.
+
+WHAT TO DO:
+  Run the commands in order. Read each output before the next one; do not move on after a failure.
+
+COMMANDS:
+  kubectl $NS exec deploy/product-service -- env | grep AWS_CONTAINER
+    ^ Reaches into a pod or forwards a port. Success: a shell/connection. Failure: connection refused/timeout -> app not listening or NetworkPolicy/SG blocking.
+  kubectl $NS exec deploy/product-service -- python -c "import boto3;print(boto3.client('sts').get_caller_identity()['Arn'])"
+    ^ Reaches into a pod or forwards a port. Success: a shell/connection. Failure: connection refused/timeout -> app not listening or NetworkPolicy/SG blocking.
+  aws eks list-pod-identity-associations --cluster-name $CLUSTER_NAME
+    ^ Lists ServiceAccount-to-role bindings. Success: one entry per workload. Failure: empty -> apply 08-pod-identity.
+
+EXPECTED RESULT:
+  AWS_CONTAINER_CREDENTIALS_FULL_URI present; ARN is assumed-role/cloudcart-lab-product-service/...; three associations.
+
+WHAT SUCCESS LOOKS LIKE:
+  AWS_CONTAINER_CREDENTIALS_FULL_URI present; ARN is assumed-role/cloudcart-lab-product-service/...; three associations.
+  Output missing but no error printed = the resource is still becoming ready: re-run the verify/describe command until it matches (never add a blind sleep).
+
+WHAT FAILURE LOOKS LIKE:
+  NoCredentialsError or the node role ARN.
+
+TROUBLESHOOTING:
+  Association missing/typo, agent DaemonSet down, pod started before the association (restart it).
+  Method: SYMPTOM -> HYPOTHESIS -> DIAGNOSTIC COMMANDS -> EVIDENCE -> ROOT CAUSE -> FIX -> PREVENTION.
+
+ROOT CAUSE IF IT FAILS:
+  Most likely: Association missing/typo, agent DaemonSet down, pod started before the association (restart it).
+  Full method: docs/troubleshooting/playbooks.md.
+
+CLEANUP:
+  -
+
+WHAT THIS TEACHES:
+  Pod Identity flow end to end.
+
+---------------------------------------------------------------------------
+
+TEST ID: 8.2
+TEST NAME: Controlled failure: break the association
+
+PURPOSE:
+  Experience NoCredentialsError and fix it.
+
+PREREQUISITES:
+  The folders that create what this test touches are applied and verified (scripts/execution-order.txt); kubectl points at the cluster.
+
+WHAT TO DO:
+  Run the commands in order. Read each output before the next one; do not move on after a failure.
+
+COMMANDS:
+  aws eks delete-pod-identity-association --cluster-name $CLUSTER_NAME --association-id <id of product-service>
+    ^ Queries the EKS API. Success: JSON with the expected resource. Failure: ResourceNotFound/AccessDenied -> wrong name/region or missing IAM.
+  kubectl $NS rollout restart deploy/product-service
+    ^ Operates on workloads. Success: rollout complete/metrics returned. Failure: timed out waiting -> describe the pods; "metrics not available" -> metrics-server missing.
+  kubectl $NS logs deploy/product-service --tail=20
+    ^ Prints container logs. Success: expected application lines. Failure: errors (AccessDenied, connection timeout) point at identity or network; use --previous for crashed containers.
+
+EXPECTED RESULT:
+  Readiness fails; logs show NoCredentialsError / config load errors; pods never Ready.
+
+WHAT SUCCESS LOOKS LIKE:
+  Readiness fails; logs show NoCredentialsError / config load errors; pods never Ready.
+
+WHAT FAILURE LOOKS LIKE:
+  Pods stay healthy.
+
+TROUBLESHOOTING:
+  SYMPTOM: NotReady + NoCredentialsError. HYPOTHESIS: identity. DIAGNOSTIC: list-pod-identity-associations. ROOT CAUSE: association deleted. FIX: scripts/tf.sh 08-pod-identity apply, restart pods.
+  Method: SYMPTOM -> HYPOTHESIS -> DIAGNOSTIC COMMANDS -> EVIDENCE -> ROOT CAUSE -> FIX -> PREVENTION.
+
+ROOT CAUSE IF IT FAILS:
+  ROOT CAUSE: association deleted.
+  Full method: docs/troubleshooting/playbooks.md.
+
+CLEANUP:
+  scripts/tf.sh 08-pod-identity apply; kubectl $NS rollout restart deploy/product-service
+
+WHAT THIS TEACHES:
+  Why pods need a restart; associations are an AWS API.
+
+---------------------------------------------------------------------------
+
+
+===========================================================================
+9. IRSA TESTS
+===========================================================================
+
+TEST ID: 9.1
+TEST NAME: IRSA on EC2 nodes and on Fargate
+
+PURPOSE:
+  Show web-identity federation and the Fargate exception.
+
+PREREQUISITES:
+  The folders that create what this test touches are applied and verified (scripts/execution-order.txt); kubectl points at the cluster.
+
+WHAT TO DO:
+  Run the commands in order. Read each output before the next one; do not move on after a failure.
+
+COMMANDS:
+  scripts/render-k8s.sh
+  kubectl apply -f .rendered/namespaces/ -f .rendered/serviceaccounts/irsa-demo.yaml -f .rendered/fargate/irsa-test-pod.yaml
+    ^ Creates/updates objects. Success: "created"/"configured". Failure: validation or admission error text -> fix the manifest.
+  kubectl $NS exec irsa-test -- aws sts get-caller-identity
+    ^ Reaches into a pod or forwards a port. Success: a shell/connection. Failure: connection refused/timeout -> app not listening or NetworkPolicy/SG blocking.
+  kubectl $NS exec irsa-test -- aws s3 ls s3://<images-bucket>
+    ^ Reaches into a pod or forwards a port. Success: a shell/connection. Failure: connection refused/timeout -> app not listening or NetworkPolicy/SG blocking.
+  kubectl $NS exec irsa-test -- aws s3 cp /etc/hosts s3://<images-bucket>/x
+    ^ Reaches into a pod or forwards a port. Success: a shell/connection. Failure: connection refused/timeout -> app not listening or NetworkPolicy/SG blocking.
+  kubectl -n fargate-demo exec irsa-test -- aws sts get-caller-identity
+    ^ Reaches into a pod or forwards a port. Success: a shell/connection. Failure: connection refused/timeout -> app not listening or NetworkPolicy/SG blocking.
+
+EXPECTED RESULT:
+  Assumed role cloudcart-lab-irsa-demo; ls works; cp is AccessDenied; the Fargate pod gets the same role.
+
+WHAT SUCCESS LOOKS LIKE:
+  Assumed role cloudcart-lab-irsa-demo; ls works; cp is AccessDenied; the Fargate pod gets the same role.
+  Output missing but no error printed = the resource is still becoming ready: re-run the verify/describe command until it matches (never add a blind sleep).
+
+WHAT FAILURE LOOKS LIKE:
+  AssumeRoleWithWebIdentity not authorized.
+
+TROUBLESHOOTING:
+  Trust `sub` mismatch (namespace/name) or missing SA annotation; compare `aws iam get-role` trust with `kubectl get sa irsa-demo -o yaml`.
+  Method: SYMPTOM -> HYPOTHESIS -> DIAGNOSTIC COMMANDS -> EVIDENCE -> ROOT CAUSE -> FIX -> PREVENTION.
+
+ROOT CAUSE IF IT FAILS:
+  Most likely: Trust `sub` mismatch (namespace/name) or missing SA annotation; compare `aws iam get-role` trust with `kubectl get sa irsa-demo -o yaml`.
+  Full method: docs/troubleshooting/playbooks.md.
+
+CLEANUP:
+  kubectl delete -f .rendered/fargate/irsa-test-pod.yaml
+
+WHAT THIS TEACHES:
+  IRSA flow; why Fargate needs it.
+
+---------------------------------------------------------------------------
+
+
+===========================================================================
+10. NODE GROUP TESTS
+===========================================================================
+
+TEST ID: 10.1
+TEST NAME: Nodes, IMDSv2 hop limit, security groups
+
+PURPOSE:
+  Confirm the launch template hardening.
+
+PREREQUISITES:
+  The folders that create what this test touches are applied and verified (scripts/execution-order.txt); kubectl points at the cluster.
+
+WHAT TO DO:
+  Run the commands in order. Read each output before the next one; do not move on after a failure.
+
+COMMANDS:
+  INSTANCE=$(kubectl get nodes -o jsonpath='{.items[0].spec.providerID}' | awk -F/ '{print $NF}')
+  aws ec2 describe-instances --instance-ids $INSTANCE --query 'Reservations[0].Instances[0].[MetadataOptions.HttpTokens,MetadataOptions.HttpPutResponseHopLimit,SecurityGroups[].GroupName]'
+    ^ Reads EC2/VPC objects. Success: the expected IDs/states. Failure: empty list = not created or filtered by the wrong tag/region.
+  kubectl $NS run imds --rm -it --image=public.ecr.aws/docker/library/busybox:1.37 -- wget -T3 -qO- http://169.254.169.254/latest/meta-data/
+    ^ Creates/updates objects. Success: "created"/"configured". Failure: validation or admission error text -> fix the manifest.
+
+EXPECTED RESULT:
+  required, 1, two security groups; the pod cannot reach IMDS (timeout).
+
+WHAT SUCCESS LOOKS LIKE:
+  required, 1, two security groups; the pod cannot reach IMDS (timeout).
+  Output missing but no error printed = the resource is still becoming ready: re-run the verify/describe command until it matches (never add a blind sleep).
+
+WHAT FAILURE LOOKS LIKE:
+  Pod reads metadata.
+
+TROUBLESHOOTING:
+  Hop limit > 1 lets pods steal node credentials. Fix the launch template and roll the nodes.
+  Method: SYMPTOM -> HYPOTHESIS -> DIAGNOSTIC COMMANDS -> EVIDENCE -> ROOT CAUSE -> FIX -> PREVENTION.
+
+ROOT CAUSE IF IT FAILS:
+  Most likely: Hop limit > 1 lets pods steal node credentials. Fix the launch template and roll the nodes.
+  Full method: docs/troubleshooting/playbooks.md.
+
+CLEANUP:
+  -
+
+WHAT THIS TEACHES:
+  Why pods must not reach IMDS.
+
+---------------------------------------------------------------------------
+
+
+===========================================================================
+11. KARPENTER TESTS
+===========================================================================
+
+TEST ID: 11.1
+TEST NAME: Pending pod -> node -> consolidation
+
+PURPOSE:
+  See just-in-time provisioning end to end.
+
+PREREQUISITES:
+  The folders that create what this test touches are applied and verified (scripts/execution-order.txt); kubectl points at the cluster.
+
+WHAT TO DO:
+  Run the commands in order. Read each output before the next one; do not move on after a failure.
+
+COMMANDS:
+  scripts/deploy-karpenter.sh
+  kubectl apply -f kubernetes/karpenter/inflate.yaml
+    ^ Creates/updates objects. Success: "created"/"configured". Failure: validation or admission error text -> fix the manifest.
+  kubectl $NS scale deploy/inflate --replicas=12
+    ^ Operates on workloads. Success: rollout complete/metrics returned. Failure: timed out waiting -> describe the pods; "metrics not available" -> metrics-server missing.
+  kubectl $NS get pods -w
+    ^ Lists pods. Success: Running and READY n/n. Failure: Pending, CrashLoopBackOff, ImagePullBackOff -> kubectl describe pod / logs.
+  kubectl -n kube-system logs deploy/karpenter -f
+    ^ Prints container logs. Success: expected application lines. Failure: errors (AccessDenied, connection timeout) point at identity or network; use --previous for crashed containers.
+  kubectl get nodeclaims,nodes -L karpenter.sh/capacity-type,node.kubernetes.io/instance-type
+    ^ Reads or changes Kubernetes objects. Success: the expected objects/fields. Failure: NotFound/Forbidden -> namespace, name or RBAC/access entry.
+  kubectl $NS scale deploy/inflate --replicas=0
+    ^ Operates on workloads. Success: rollout complete/metrics returned. Failure: timed out waiting -> describe the pods; "metrics not available" -> metrics-server missing.
+
+EXPECTED RESULT:
+  Pods Pending (Insufficient cpu) -> Karpenter 'found provisionable pod(s)' -> NodeClaim -> node Ready -> pods Running -> after scale to 0 the node is removed within about a minute.
+
+WHAT SUCCESS LOOKS LIKE:
+  Pods Pending (Insufficient cpu) -> Karpenter 'found provisionable pod(s)' -> NodeClaim -> node Ready -> pods Running -> after scale to 0 the node is removed within about a minute.
+  Output missing but no error printed = the resource is still becoming ready: re-run the verify/describe command until it matches (never add a blind sleep).
+
+WHAT FAILURE LOOKS LIKE:
+  Pods stay Pending and nothing launches.
+
+TROUBLESHOOTING:
+  Logs: no NodePool matches (requirements/taints), limits reached, EC2NodeClass not Ready (no subnets/SGs found by tag), or launch denied by IAM. Check `kubectl describe ec2nodeclass default`.
+  Method: SYMPTOM -> HYPOTHESIS -> DIAGNOSTIC COMMANDS -> EVIDENCE -> ROOT CAUSE -> FIX -> PREVENTION.
+
+ROOT CAUSE IF IT FAILS:
+  Most likely: Logs: no NodePool matches (requirements/taints), limits reached, EC2NodeClass not Ready (no subnets/SGs found by tag), or launch denied by IAM. Check `kubectl describe ec2nodeclass default`.
+  Full method: docs/troubleshooting/playbooks.md.
+
+CLEANUP:
+  kubectl delete -f kubernetes/karpenter/inflate.yaml
+
+WHAT THIS TEACHES:
+  The scheduling -> provisioning -> consolidation chain.
+
+---------------------------------------------------------------------------
+
+TEST ID: 11.2
+TEST NAME: Spot interruption simulation
+
+PURPOSE:
+  Observe graceful handling of an interruption warning.
+
+PREREQUISITES:
+  The folders that create what this test touches are applied and verified (scripts/execution-order.txt); kubectl points at the cluster.
+
+WHAT TO DO:
+  Run the commands in order. Read each output before the next one; do not move on after a failure.
+
+COMMANDS:
+  aws ec2 describe-instances --filters Name=tag:karpenter.sh/nodepool,Values=batch-spot --query 'Reservations[].Instances[].InstanceId'
+    ^ Reads EC2/VPC objects. Success: the expected IDs/states. Failure: empty list = not created or filtered by the wrong tag/region.
+  # send a test event to the interruption queue (named after the cluster):
+  aws sqs send-message --queue-url $(aws sqs get-queue-url --queue-name $CLUSTER_NAME --query QueueUrl --output text) --message-body '{"detail-type":"EC2 Spot Instance Interruption Warning","source":"aws.ec2","detail":{"instance-id":"<id>"}}'
+    ^ Calls SQS. Success: attributes/messages as expected. Failure: NonExistentQueue or AccessDenied.
+  kubectl -n kube-system logs deploy/karpenter | grep -i interrupt
+    ^ Prints container logs. Success: expected application lines. Failure: errors (AccessDenied, connection timeout) point at identity or network; use --previous for crashed containers.
+
+EXPECTED RESULT:
+  Karpenter cordons/drains the node and the worker pods reschedule; messages are not lost (SQS redelivers).
+
+WHAT SUCCESS LOOKS LIKE:
+  Karpenter cordons/drains the node and the worker pods reschedule; messages are not lost (SQS redelivers).
+  Output missing but no error printed = the resource is still becoming ready: re-run the verify/describe command until it matches (never add a blind sleep).
+
+WHAT FAILURE LOOKS LIKE:
+  No reaction.
+
+TROUBLESHOOTING:
+  Queue name must equal settings.interruptionQueue; message format must match.
+  Method: SYMPTOM -> HYPOTHESIS -> DIAGNOSTIC COMMANDS -> EVIDENCE -> ROOT CAUSE -> FIX -> PREVENTION.
+
+ROOT CAUSE IF IT FAILS:
+  Most likely: Queue name must equal settings.interruptionQueue; message format must match.
+  Full method: docs/troubleshooting/playbooks.md.
+
+CLEANUP:
+  -
+
+WHAT THIS TEACHES:
+  Spot interruption flow.
+
+---------------------------------------------------------------------------
+
+
+===========================================================================
+12. EBS TESTS
+===========================================================================
+
+TEST ID: 12.1
+TEST NAME: Dynamic provisioning, persistence, AZ binding
+
+PURPOSE:
+  A PVC becomes an encrypted EBS volume in the pod's AZ.
+
+PREREQUISITES:
+  The folders that create what this test touches are applied and verified (scripts/execution-order.txt); kubectl points at the cluster.
+
+WHAT TO DO:
+  Run the commands in order. Read each output before the next one; do not move on after a failure.
+
+COMMANDS:
+  scripts/render-k8s.sh
+  kubectl apply -f .rendered/storage/storageclass-ebs.yaml -f .rendered/storage/ebs-demo.yaml
+    ^ Creates/updates objects. Success: "created"/"configured". Failure: validation or admission error text -> fix the manifest.
+  kubectl $NS get pvc,pod ebs-demo
+    ^ Reads or changes Kubernetes objects. Success: the expected objects/fields. Failure: NotFound/Forbidden -> namespace, name or RBAC/access entry.
+  kubectl $NS exec ebs-demo -- cat /data/log.txt
+    ^ Reaches into a pod or forwards a port. Success: a shell/connection. Failure: connection refused/timeout -> app not listening or NetworkPolicy/SG blocking.
+  kubectl $NS delete pod ebs-demo && kubectl apply -f .rendered/storage/ebs-demo.yaml
+    ^ Creates/updates objects. Success: "created"/"configured". Failure: validation or admission error text -> fix the manifest.
+  kubectl $NS exec ebs-demo -- cat /data/log.txt
+    ^ Reaches into a pod or forwards a port. Success: a shell/connection. Failure: connection refused/timeout -> app not listening or NetworkPolicy/SG blocking.
+  aws ec2 describe-volumes --filters Name=tag:kubernetes.io/created-for/pvc/name,Values=ebs-demo --query 'Volumes[0].[AvailabilityZone,Encrypted,KmsKeyId]'
+    ^ Reads EC2/VPC objects. Success: the expected IDs/states. Failure: empty list = not created or filtered by the wrong tag/region.
+
+EXPECTED RESULT:
+  PVC Bound after scheduling; two lines in the log after recreation; volume Encrypted true with the data CMK.
+
+WHAT SUCCESS LOOKS LIKE:
+  PVC Bound after scheduling; two lines in the log after recreation; volume Encrypted true with the data CMK.
+  Output missing but no error printed = the resource is still becoming ready: re-run the verify/describe command until it matches (never add a blind sleep).
+
+WHAT FAILURE LOOKS LIKE:
+  Pod stuck ContainerCreating.
+
+TROUBLESHOOTING:
+  'KMS key ... not authorized' = CSI role KMS grants; 'volume node affinity conflict' = AZ mismatch; PVC Pending = no consumer yet (WaitForFirstConsumer).
+  Method: SYMPTOM -> HYPOTHESIS -> DIAGNOSTIC COMMANDS -> EVIDENCE -> ROOT CAUSE -> FIX -> PREVENTION.
+
+ROOT CAUSE IF IT FAILS:
+  Most likely: 'KMS key ... not authorized' = CSI role KMS grants; 'volume node affinity conflict' = AZ mismatch; PVC Pending = no consumer yet (WaitForFirstConsumer).
+  Full method: docs/troubleshooting/playbooks.md.
+
+CLEANUP:
+  kubectl $NS delete pod,pvc ebs-demo   # deletes the volume (DESTRUCTIVE for data)
+
+WHAT THIS TEACHES:
+  StorageClass/PVC/PV/CSI, AZ limits, encryption.
+
+---------------------------------------------------------------------------
+
+
+===========================================================================
+13. EFS TESTS
+===========================================================================
+
+TEST ID: 13.1
+TEST NAME: Shared RWX filesystem across nodes
+
+PURPOSE:
+  Two pods on different nodes see the same file.
+
+PREREQUISITES:
+  The folders that create what this test touches are applied and verified (scripts/execution-order.txt); kubectl points at the cluster.
+
+WHAT TO DO:
+  Run the commands in order. Read each output before the next one; do not move on after a failure.
+
+COMMANDS:
+  kubectl apply -f .rendered/storage/storageclass-efs.yaml -f .rendered/storage/efs-demo.yaml
+    ^ Creates/updates objects. Success: "created"/"configured". Failure: validation or admission error text -> fix the manifest.
+  kubectl $NS get pods -l app=efs-demo -o wide
+    ^ Lists pods. Success: Running and READY n/n. Failure: Pending, CrashLoopBackOff, ImagePullBackOff -> kubectl describe pod / logs.
+  kubectl $NS exec <pod-a> -- cat /shared/hello.txt
+    ^ Reaches into a pod or forwards a port. Success: a shell/connection. Failure: connection refused/timeout -> app not listening or NetworkPolicy/SG blocking.
+
+EXPECTED RESULT:
+  Output contains a line from EACH pod.
+
+WHAT SUCCESS LOOKS LIKE:
+  Output contains a line from EACH pod.
+  Output missing but no error printed = the resource is still becoming ready: re-run the verify/describe command until it matches (never add a blind sleep).
+
+WHAT FAILURE LOOKS LIKE:
+  ContainerCreating with mount.nfs timeout.
+
+TROUBLESHOOTING:
+  EFS SG lacks 2049 from node-sg, no mount target in that AZ, or the CSI controller is unhealthy.
+  Method: SYMPTOM -> HYPOTHESIS -> DIAGNOSTIC COMMANDS -> EVIDENCE -> ROOT CAUSE -> FIX -> PREVENTION.
+
+ROOT CAUSE IF IT FAILS:
+  Most likely: EFS SG lacks 2049 from node-sg, no mount target in that AZ, or the CSI controller is unhealthy.
+  Full method: docs/troubleshooting/playbooks.md.
+
+CLEANUP:
+  kubectl $NS delete -f .rendered/storage/efs-demo.yaml
+
+WHAT THIS TEACHES:
+  EFS vs EBS, mount targets, access points, SGs.
+
+---------------------------------------------------------------------------
+
+TEST ID: 13.2
+TEST NAME: Controlled failure: block NFS
+
+PURPOSE:
+  Cause and diagnose an EFS mount failure.
+
+PREREQUISITES:
+  The folders that create what this test touches are applied and verified (scripts/execution-order.txt); kubectl points at the cluster.
+
+WHAT TO DO:
+  Run the commands in order. Read each output before the next one; do not move on after a failure.
+
+COMMANDS:
+  aws ec2 revoke-security-group-ingress --group-id <efs-sg> --protocol tcp --port 2049 --source-group <node-sg>
+  kubectl $NS delete pod -l app=efs-demo
+    ^ Deletes objects (check the namespace first). Success: "deleted". Failure: stuck Terminating -> finalizer/volume detach.
+  kubectl $NS describe pod -l app=efs-demo | tail
+    ^ Shows state, conditions and EVENTS. Success: no Warning events. Failure: the Events section names the cause (FailedScheduling, FailedMount, Failed pull...).
+
+EXPECTED RESULT:
+  New pods hang ContainerCreating; event: mount.nfs: Connection timed out.
+
+WHAT SUCCESS LOOKS LIKE:
+  New pods hang ContainerCreating; event: mount.nfs: Connection timed out.
+
+WHAT FAILURE LOOKS LIKE:
+  Pods start.
+
+TROUBLESHOOTING:
+  SYMPTOM: ContainerCreating. HYPOTHESIS: network to EFS. EVIDENCE: mount.nfs timeout (not 'access denied'). ROOT CAUSE: SG rule removed. FIX: scripts/tf.sh 03-security-groups apply.
+  Method: SYMPTOM -> HYPOTHESIS -> DIAGNOSTIC COMMANDS -> EVIDENCE -> ROOT CAUSE -> FIX -> PREVENTION.
+
+ROOT CAUSE IF IT FAILS:
+  ROOT CAUSE: SG rule removed.
+  Full method: docs/troubleshooting/playbooks.md.
+
+CLEANUP:
+  scripts/tf.sh 03-security-groups apply
+
+WHAT THIS TEACHES:
+  SG blocks look like timeouts.
+
+---------------------------------------------------------------------------
+
+
+===========================================================================
+14. S3 TESTS
+===========================================================================
+
+TEST ID: 14.1
+TEST NAME: Upload and read with Pod Identity
+
+PURPOSE:
+  Pod reads/writes S3 with temporary credentials and KMS.
+
+PREREQUISITES:
+  The folders that create what this test touches are applied and verified (scripts/execution-order.txt); kubectl points at the cluster.
+
+WHAT TO DO:
+  Run the commands in order. Read each output before the next one; do not move on after a failure.
+
+COMMANDS:
+  kubectl $NS port-forward svc/product-service 8081:8080 &
+    ^ Reaches into a pod or forwards a port. Success: a shell/connection. Failure: connection refused/timeout -> app not listening or NetworkPolicy/SG blocking.
+  curl -s -F file=@image.png -H 'Content-Type: multipart/form-data' localhost:8081/products/p-1001/image
+    ^ Network probe. Success: HTTP 2xx / expected answer. Failure: timeout = network/SG/NetworkPolicy; refused = nothing listening; 403 = WAF/auth; 5xx = backend.
+  aws s3 ls s3://<images-bucket>/products/ --recursive
+    ^ Calls S3 with your current identity. Success: expected objects/data. Failure: AccessDenied -> policy/KMS; NoSuchBucket -> wrong name/region.
+  aws s3api head-object --bucket <b> --key products/p-1001/image.png --query ServerSideEncryption
+    ^ Calls S3 with your current identity. Success: expected objects/data. Failure: AccessDenied -> policy/KMS; NoSuchBucket -> wrong name/region.
+
+EXPECTED RESULT:
+  201 with the key; object listed; ServerSideEncryption aws:kms.
+
+WHAT SUCCESS LOOKS LIKE:
+  201 with the key; object listed; ServerSideEncryption aws:kms.
+  Output missing but no error printed = the resource is still becoming ready: re-run the verify/describe command until it matches (never add a blind sleep).
+
+WHAT FAILURE LOOKS LIKE:
+  502 'image storage error' / AccessDenied.
+
+TROUBLESHOOTING:
+  Two gates: s3:PutObject AND kms:GenerateDataKey. CloudTrail: aws cloudtrail lookup-events --lookup-attributes AttributeKey=EventName,AttributeValue=PutObject.
+  Method: SYMPTOM -> HYPOTHESIS -> DIAGNOSTIC COMMANDS -> EVIDENCE -> ROOT CAUSE -> FIX -> PREVENTION.
+
+ROOT CAUSE IF IT FAILS:
+  Most likely: Two gates: s3:PutObject AND kms:GenerateDataKey. CloudTrail: aws cloudtrail lookup-events --lookup-attributes AttributeKey=EventName,AttributeValue=PutObject.
+  Full method: docs/troubleshooting/playbooks.md.
+
+CLEANUP:
+  kill the port-forward
+
+WHAT THIS TEACHES:
+  S3 + KMS permissions, bucket policy, versioning.
+
+---------------------------------------------------------------------------
+
+TEST ID: 14.2
+TEST NAME: Controlled failure: remove KMS permission
+
+PURPOSE:
+  Reproduce the classic AccessDenied.
+
+PREREQUISITES:
+  The folders that create what this test touches are applied and verified (scripts/execution-order.txt); kubectl points at the cluster.
+
+WHAT TO DO:
+  Run the commands in order. Read each output before the next one; do not move on after a failure.
+
+COMMANDS:
+  aws iam delete-role-policy --role-name cloudcart-lab-product-service --policy-name s3-product-images   # then re-upload
+    ^ Reads that service. Success: the resource exists in the expected state. Failure: NotFound/AccessDenied -> wrong region, not applied, or missing IAM.
+  # ...or only the KMS statement by editing the policy in the console
+
+EXPECTED RESULT:
+  Upload fails with AccessDenied.
+
+WHAT SUCCESS LOOKS LIKE:
+  Upload fails with AccessDenied.
+
+WHAT FAILURE LOOKS LIKE:
+  Upload still works.
+
+TROUBLESHOOTING:
+  SYMPTOM AccessDenied. HYPOTHESES: IAM, bucket policy, KMS. EVIDENCE: error text names the action and principal; CloudTrail errorCode. ROOT CAUSE: policy removed. FIX: scripts/tf.sh 15-s3 apply.
+  Method: SYMPTOM -> HYPOTHESIS -> DIAGNOSTIC COMMANDS -> EVIDENCE -> ROOT CAUSE -> FIX -> PREVENTION.
+
+ROOT CAUSE IF IT FAILS:
+  ROOT CAUSE: policy removed.
+  Full method: docs/troubleshooting/playbooks.md.
+
+CLEANUP:
+  scripts/tf.sh 15-s3 apply
+
+WHAT THIS TEACHES:
+  Troubleshooting AccessDenied.
+
+---------------------------------------------------------------------------
+
+
+===========================================================================
+15. RDS TESTS
+===========================================================================
+
+TEST ID: 15.1
+TEST NAME: Order service reaches RDS
+
+PURPOSE:
+  Create an order and see the row.
+
+PREREQUISITES:
+  The folders that create what this test touches are applied and verified (scripts/execution-order.txt); kubectl points at the cluster.
+
+WHAT TO DO:
+  Run the commands in order. Read each output before the next one; do not move on after a failure.
+
+COMMANDS:
+  kubectl $NS port-forward svc/order-service 8082:8080 &
+    ^ Reaches into a pod or forwards a port. Success: a shell/connection. Failure: connection refused/timeout -> app not listening or NetworkPolicy/SG blocking.
+  curl -s -X POST localhost:8082/orders -H 'content-type: application/json' -d '{"customer":"demo","items":[{"product_id":"p-1001","quantity":2,"unit_price":19.99}]}'
+    ^ Network probe. Success: HTTP 2xx / expected answer. Failure: timeout = network/SG/NetworkPolicy; refused = nothing listening; 403 = WAF/auth; 5xx = backend.
+  curl -s localhost:8082/orders/<id>
+    ^ Network probe. Success: HTTP 2xx / expected answer. Failure: timeout = network/SG/NetworkPolicy; refused = nothing listening; 403 = WAF/auth; 5xx = backend.
+
+EXPECTED RESULT:
+  202 with an order id; GET shows PENDING then PROCESSED after the worker runs.
+
+WHAT SUCCESS LOOKS LIKE:
+  202 with an order id; GET shows PENDING then PROCESSED after the worker runs.
+  Output missing but no error printed = the resource is still becoming ready: re-run the verify/describe command until it matches (never add a blind sleep).
+
+WHAT FAILURE LOOKS LIKE:
+  503 'order database unavailable'.
+
+TROUBLESHOOTING:
+  Two conditions: routing in the VPC (always) AND rds SG allows node-sg. Check `kubectl $NS logs deploy/order-service`, `aws ec2 describe-security-group-rules`, TLS (sslmode=require), the secret value.
+  Method: SYMPTOM -> HYPOTHESIS -> DIAGNOSTIC COMMANDS -> EVIDENCE -> ROOT CAUSE -> FIX -> PREVENTION.
+
+ROOT CAUSE IF IT FAILS:
+  Most likely: Two conditions: routing in the VPC (always) AND rds SG allows node-sg. Check `kubectl $NS logs deploy/order-service`, `aws ec2 describe-security-group-rules`, TLS (sslmode=require), the secret value.
+  Full method: docs/troubleshooting/playbooks.md.
+
+CLEANUP:
+  -
+
+WHAT THIS TEACHES:
+  How a pod connects to RDS; secrets at runtime.
+
+---------------------------------------------------------------------------
+
+TEST ID: 15.2
+TEST NAME: Controlled failure: security group blocks RDS
+
+PURPOSE:
+  Reproduce a database timeout.
+
+PREREQUISITES:
+  The folders that create what this test touches are applied and verified (scripts/execution-order.txt); kubectl points at the cluster.
+
+WHAT TO DO:
+  Run the commands in order. Read each output before the next one; do not move on after a failure.
+
+COMMANDS:
+  aws ec2 revoke-security-group-ingress --group-id <rds-sg> --protocol tcp --port 5432 --source-group <node-sg>
+  kubectl $NS rollout restart deploy/order-service
+    ^ Operates on workloads. Success: rollout complete/metrics returned. Failure: timed out waiting -> describe the pods; "metrics not available" -> metrics-server missing.
+  kubectl $NS get pods -w
+    ^ Lists pods. Success: Running and READY n/n. Failure: Pending, CrashLoopBackOff, ImagePullBackOff -> kubectl describe pod / logs.
+
+EXPECTED RESULT:
+  New pods never become Ready (readiness opens a DB connection); logs show connection timeout.
+
+WHAT SUCCESS LOOKS LIKE:
+  New pods never become Ready (readiness opens a DB connection); logs show connection timeout.
+
+WHAT FAILURE LOOKS LIKE:
+  Pods Ready.
+
+TROUBLESHOOTING:
+  SYMPTOM: NotReady, timeouts (not refused). HYPOTHESIS: SG. DIAGNOSTIC: nc -vz host 5432 from a pod. ROOT CAUSE: ingress rule removed. FIX: scripts/tf.sh 03-security-groups apply.
+  Method: SYMPTOM -> HYPOTHESIS -> DIAGNOSTIC COMMANDS -> EVIDENCE -> ROOT CAUSE -> FIX -> PREVENTION.
+
+ROOT CAUSE IF IT FAILS:
+  ROOT CAUSE: ingress rule removed.
+  Full method: docs/troubleshooting/playbooks.md.
+
+CLEANUP:
+  scripts/tf.sh 03-security-groups apply
+
+WHAT THIS TEACHES:
+  SG drops packets silently; readiness protects users.
+
+---------------------------------------------------------------------------
+
+
+===========================================================================
+16. DYNAMODB TESTS
+===========================================================================
+
+TEST ID: 16.1
+TEST NAME: Catalog reads and writes
+
+PURPOSE:
+  DynamoDB access through Pod Identity.
+
+PREREQUISITES:
+  The folders that create what this test touches are applied and verified (scripts/execution-order.txt); kubectl points at the cluster.
+
+WHAT TO DO:
+  Run the commands in order. Read each output before the next one; do not move on after a failure.
+
+COMMANDS:
+  curl -s localhost:8081/products
+    ^ Network probe. Success: HTTP 2xx / expected answer. Failure: timeout = network/SG/NetworkPolicy; refused = nothing listening; 403 = WAF/auth; 5xx = backend.
+  curl -s -X POST localhost:8081/products -H 'content-type: application/json' -d '{"product_id":"p-2001","name":"USB Hub","price":24.5,"category":"accessories"}'
+    ^ Network probe. Success: HTTP 2xx / expected answer. Failure: timeout = network/SG/NetworkPolicy; refused = nothing listening; 403 = WAF/auth; 5xx = backend.
+  aws dynamodb get-item --table-name cloudcart-lab-products --key '{"product_id":{"S":"p-2001"}}'
+    ^ Calls DynamoDB. Success: items/table description as expected. Failure: ResourceNotFound/AccessDeniedException.
+
+EXPECTED RESULT:
+  List returns the seed items; POST 201; the item exists in the table.
+
+WHAT SUCCESS LOOKS LIKE:
+  List returns the seed items; POST 201; the item exists in the table.
+  Output missing but no error printed = the resource is still becoming ready: re-run the verify/describe command until it matches (never add a blind sleep).
+
+WHAT FAILURE LOOKS LIKE:
+  502 catalog unavailable.
+
+TROUBLESHOOTING:
+  AccessDenied: policy missing table or /index/* ARN; VPC endpoint route missing.
+  Method: SYMPTOM -> HYPOTHESIS -> DIAGNOSTIC COMMANDS -> EVIDENCE -> ROOT CAUSE -> FIX -> PREVENTION.
+
+ROOT CAUSE IF IT FAILS:
+  Most likely: AccessDenied: policy missing table or /index/* ARN; VPC endpoint route missing.
+  Full method: docs/troubleshooting/playbooks.md.
+
+CLEANUP:
+  aws dynamodb delete-item for p-2001
+
+WHAT THIS TEACHES:
+  Key design, IAM-only auth.
+
+---------------------------------------------------------------------------
+
+
+===========================================================================
+17. REDIS TESTS
+===========================================================================
+
+TEST ID: 17.1
+TEST NAME: Cache hit and fail-open
+
+PURPOSE:
+  First call hits DynamoDB, second hits the cache; cache outage does not break the API.
+
+PREREQUISITES:
+  The folders that create what this test touches are applied and verified (scripts/execution-order.txt); kubectl points at the cluster.
+
+WHAT TO DO:
+  Run the commands in order. Read each output before the next one; do not move on after a failure.
+
+COMMANDS:
+  curl -s localhost:8081/products | jq .source; curl -s localhost:8081/products | jq .source
+    ^ Network probe. Success: HTTP 2xx / expected answer. Failure: timeout = network/SG/NetworkPolicy; refused = nothing listening; 403 = WAF/auth; 5xx = backend.
+  # break it: aws ec2 revoke-security-group-ingress --group-id <redis-sg> --protocol tcp --port 6379 --source-group <node-sg>; restart product-service
+  curl -s localhost:8081/products | jq .source
+    ^ Network probe. Success: HTTP 2xx / expected answer. Failure: timeout = network/SG/NetworkPolicy; refused = nothing listening; 403 = WAF/auth; 5xx = backend.
+
+EXPECTED RESULT:
+  dynamodb then cache; with the SG removed the API still answers (source dynamodb) and /ready shows cache down.
+
+WHAT SUCCESS LOOKS LIKE:
+  dynamodb then cache; with the SG removed the API still answers (source dynamodb) and /ready shows cache down.
+  Output missing but no error printed = the resource is still becoming ready: re-run the verify/describe command until it matches (never add a blind sleep).
+
+WHAT FAILURE LOOKS LIKE:
+  API errors when the cache is down.
+
+TROUBLESHOOTING:
+  The app must treat the cache as optional. Check logs for 'redis unavailable, running without cache'.
+  Method: SYMPTOM -> HYPOTHESIS -> DIAGNOSTIC COMMANDS -> EVIDENCE -> ROOT CAUSE -> FIX -> PREVENTION.
+
+ROOT CAUSE IF IT FAILS:
+  Most likely: The app must treat the cache as optional. Check logs for 'redis unavailable, running without cache'.
+  Full method: docs/troubleshooting/playbooks.md.
+
+CLEANUP:
+  scripts/tf.sh 03-security-groups apply; restart product-service
+
+WHAT THIS TEACHES:
+  Cache failure behaviour.
+
+---------------------------------------------------------------------------
+
+
+===========================================================================
+18. SQS TESTS
+===========================================================================
+
+TEST ID: 18.1
+TEST NAME: Queue processing, retries and DLQ
+
+PURPOSE:
+  Orders flow through the queue; poison messages land in the DLQ.
+
+PREREQUISITES:
+  The folders that create what this test touches are applied and verified (scripts/execution-order.txt); kubectl points at the cluster.
+
+WHAT TO DO:
+  Run the commands in order. Read each output before the next one; do not move on after a failure.
+
+COMMANDS:
+  aws sqs get-queue-attributes --queue-url <orders-url> --attribute-names ApproximateNumberOfMessages
+    ^ Calls SQS. Success: attributes/messages as expected. Failure: NonExistentQueue or AccessDenied.
+  aws sqs send-message --queue-url <orders-url> --message-body 'not-json'
+    ^ Calls SQS. Success: attributes/messages as expected. Failure: NonExistentQueue or AccessDenied.
+  kubectl $NS logs deploy/worker -f   # fails repeatedly
+    ^ Prints container logs. Success: expected application lines. Failure: errors (AccessDenied, connection timeout) point at identity or network; use --previous for crashed containers.
+  aws sqs get-queue-attributes --queue-url <dlq-url> --attribute-names ApproximateNumberOfMessages
+    ^ Calls SQS. Success: attributes/messages as expected. Failure: NonExistentQueue or AccessDenied.
+
+EXPECTED RESULT:
+  The poison message is received up to 5 times then appears in the DLQ.
+
+WHAT SUCCESS LOOKS LIKE:
+  The poison message is received up to 5 times then appears in the DLQ.
+  Output missing but no error printed = the resource is still becoming ready: re-run the verify/describe command until it matches (never add a blind sleep).
+
+WHAT FAILURE LOOKS LIKE:
+  Message disappears or never reaches the DLQ.
+
+TROUBLESHOOTING:
+  Redrive policy/maxReceiveCount; visibility timeout shorter than processing time causes duplicates.
+  Method: SYMPTOM -> HYPOTHESIS -> DIAGNOSTIC COMMANDS -> EVIDENCE -> ROOT CAUSE -> FIX -> PREVENTION.
+
+ROOT CAUSE IF IT FAILS:
+  Most likely: Redrive policy/maxReceiveCount; visibility timeout shorter than processing time causes duplicates.
+  Full method: docs/troubleshooting/playbooks.md.
+
+CLEANUP:
+  aws sqs purge-queue --queue-url <dlq-url>
+
+WHAT THIS TEACHES:
+  Visibility timeout, retries, DLQ.
+
+---------------------------------------------------------------------------
+
+TEST ID: 18.2
+TEST NAME: Controlled failure: worker permission
+
+PURPOSE:
+  Break the worker's SQS permissions.
+
+PREREQUISITES:
+  The folders that create what this test touches are applied and verified (scripts/execution-order.txt); kubectl points at the cluster.
+
+WHAT TO DO:
+  Run the commands in order. Read each output before the next one; do not move on after a failure.
+
+COMMANDS:
+  aws iam delete-role-policy --role-name cloudcart-lab-worker --policy-name sqs-consume-orders
+    ^ Reads that service. Success: the resource exists in the expected state. Failure: NotFound/AccessDenied -> wrong region, not applied, or missing IAM.
+  kubectl $NS rollout restart deploy/worker; kubectl $NS logs deploy/worker --tail=20
+    ^ Operates on workloads. Success: rollout complete/metrics returned. Failure: timed out waiting -> describe the pods; "metrics not available" -> metrics-server missing.
+
+EXPECTED RESULT:
+  AccessDenied on ReceiveMessage; queue depth grows.
+
+WHAT SUCCESS LOOKS LIKE:
+  AccessDenied on ReceiveMessage; queue depth grows.
+
+WHAT FAILURE LOOKS LIKE:
+  Worker keeps processing.
+
+TROUBLESHOOTING:
+  Policy missing (or KMS decrypt missing). FIX: scripts/tf.sh 22-sqs apply.
+  Method: SYMPTOM -> HYPOTHESIS -> DIAGNOSTIC COMMANDS -> EVIDENCE -> ROOT CAUSE -> FIX -> PREVENTION.
+
+ROOT CAUSE IF IT FAILS:
+  Most likely: Policy missing (or KMS decrypt missing). FIX: scripts/tf.sh 22-sqs apply.
+  Full method: docs/troubleshooting/playbooks.md.
+
+CLEANUP:
+  scripts/tf.sh 22-sqs apply
+
+WHAT THIS TEACHES:
+  Producer and consumer have different rights.
+
+---------------------------------------------------------------------------
+
+
+===========================================================================
+19. SNS TESTS
+===========================================================================
+
+TEST ID: 19.1
+TEST NAME: Fan-out
+
+PURPOSE:
+  One event reaches the subscriber queue.
+
+PREREQUISITES:
+  The folders that create what this test touches are applied and verified (scripts/execution-order.txt); kubectl points at the cluster.
+
+WHAT TO DO:
+  Run the commands in order. Read each output before the next one; do not move on after a failure.
+
+COMMANDS:
+  aws sqs receive-message --queue-url <notifications-url> --max-number-of-messages 5
+    ^ Calls SQS. Success: attributes/messages as expected. Failure: NonExistentQueue or AccessDenied.
+
+EXPECTED RESULT:
+  After an order is PROCESSED a message with the order id appears.
+
+WHAT SUCCESS LOOKS LIKE:
+  After an order is PROCESSED a message with the order id appears.
+  Output missing but no error printed = the resource is still becoming ready: re-run the verify/describe command until it matches (never add a blind sleep).
+
+WHAT FAILURE LOOKS LIKE:
+  Empty queue.
+
+TROUBLESHOOTING:
+  Queue policy missing or KMS key policy lacks sns.amazonaws.com; check the subscription is confirmed.
+  Method: SYMPTOM -> HYPOTHESIS -> DIAGNOSTIC COMMANDS -> EVIDENCE -> ROOT CAUSE -> FIX -> PREVENTION.
+
+ROOT CAUSE IF IT FAILS:
+  Most likely: Queue policy missing or KMS key policy lacks sns.amazonaws.com; check the subscription is confirmed.
+  Full method: docs/troubleshooting/playbooks.md.
+
+CLEANUP:
+  -
+
+WHAT THIS TEACHES:
+  Pub/sub fan-out.
+
+---------------------------------------------------------------------------
+
+
+===========================================================================
+20. EVENTBRIDGE TESTS
+===========================================================================
+
+TEST ID: 20.1
+TEST NAME: Route an event
+
+PURPOSE:
+  A test event matches the rule and triggers the Lambda.
+
+PREREQUISITES:
+  The folders that create what this test touches are applied and verified (scripts/execution-order.txt); kubectl points at the cluster.
+
+WHAT TO DO:
+  Run the commands in order. Read each output before the next one; do not move on after a failure.
+
+COMMANDS:
+  aws events put-events --entries '[{"Source":"cloudcart.orders","DetailType":"OrderProcessed","Detail":"{\"order_id\":\"test-1\"}","EventBusName":"cloudcart-lab"}]'
+    ^ Calls EventBridge. Success: bus/rule/targets present. Failure: ResourceNotFoundException.
+  aws logs tail /aws/lambda/cloudcart-lab-order-notifier --since 5m
+    ^ Reads CloudWatch Logs. Success: log lines from the component. Failure: no log group/stream -> logging not configured or no traffic yet.
+
+EXPECTED RESULT:
+  FailedEntryCount 0 and a Lambda invocation log.
+
+WHAT SUCCESS LOOKS LIKE:
+  FailedEntryCount 0 and a Lambda invocation log.
+  Output missing but no error printed = the resource is still becoming ready: re-run the verify/describe command until it matches (never add a blind sleep).
+
+WHAT FAILURE LOOKS LIKE:
+  No log line.
+
+TROUBLESHOOTING:
+  Pattern mismatch (aws events test-event-pattern), missing lambda permission, wrong bus name.
+  Method: SYMPTOM -> HYPOTHESIS -> DIAGNOSTIC COMMANDS -> EVIDENCE -> ROOT CAUSE -> FIX -> PREVENTION.
+
+ROOT CAUSE IF IT FAILS:
+  Most likely: Pattern mismatch (aws events test-event-pattern), missing lambda permission, wrong bus name.
+  Full method: docs/troubleshooting/playbooks.md.
+
+CLEANUP:
+  -
+
+WHAT THIS TEACHES:
+  EventBridge routing vs SQS/SNS.
+
+---------------------------------------------------------------------------
+
+
+===========================================================================
+21. LAMBDA TESTS
+===========================================================================
+
+TEST ID: 21.1
+TEST NAME: Invoke and failure handling
+
+PURPOSE:
+  Direct invoke and a forced failure that ends in the DLQ.
+
+PREREQUISITES:
+  The folders that create what this test touches are applied and verified (scripts/execution-order.txt); kubectl points at the cluster.
+
+WHAT TO DO:
+  Run the commands in order. Read each output before the next one; do not move on after a failure.
+
+COMMANDS:
+  aws lambda invoke --function-name cloudcart-lab-order-notifier --payload '{"detail":{"order_id":"x"},"detail-type":"OrderProcessed"}' --cli-binary-format raw-in-base64-out out.json; cat out.json
+    ^ Calls Lambda. Success: StatusCode 200 / expected configuration. Failure: FunctionError or ResourceNotFound -> read the function logs.
+
+EXPECTED RESULT:
+  published true with a message id.
+
+WHAT SUCCESS LOOKS LIKE:
+  published true with a message id.
+  Output missing but no error printed = the resource is still becoming ready: re-run the verify/describe command until it matches (never add a blind sleep).
+
+WHAT FAILURE LOOKS LIKE:
+  AccessDenied sns:Publish or kms.
+
+TROUBLESHOOTING:
+  Role lacks publish/KMS on the encrypted topic.
+  Method: SYMPTOM -> HYPOTHESIS -> DIAGNOSTIC COMMANDS -> EVIDENCE -> ROOT CAUSE -> FIX -> PREVENTION.
+
+ROOT CAUSE IF IT FAILS:
+  Most likely: Role lacks publish/KMS on the encrypted topic.
+  Full method: docs/troubleshooting/playbooks.md.
+
+CLEANUP:
+  rm out.json
+
+WHAT THIS TEACHES:
+  Lambda roles and async retry/DLQ.
+
+---------------------------------------------------------------------------
+
+
+===========================================================================
+22. ROUTE53 TESTS (optional: needs a domain)
+===========================================================================
+
+TEST ID: 22.1
+TEST NAME: Zone and delegation
+
+PURPOSE:
+  DNS resolves through Route 53.
+
+PREREQUISITES:
+  The folders that create what this test touches are applied and verified (scripts/execution-order.txt); kubectl points at the cluster.
+
+WHAT TO DO:
+  Run the commands in order. Read each output before the next one; do not move on after a failure.
+
+COMMANDS:
+  dig NS <domain> +short; aws route53 list-hosted-zones-by-name --dns-name <domain>
+    ^ Network probe. Success: HTTP 2xx / expected answer. Failure: timeout = network/SG/NetworkPolicy; refused = nothing listening; 403 = WAF/auth; 5xx = backend.
+  dig cloudcart.<domain> +short
+    ^ Network probe. Success: HTTP 2xx / expected answer. Failure: timeout = network/SG/NetworkPolicy; refused = nothing listening; 403 = WAF/auth; 5xx = backend.
+
+EXPECTED RESULT:
+  NS records match the zone; the app name resolves.
+
+WHAT SUCCESS LOOKS LIKE:
+  NS records match the zone; the app name resolves.
+  Output missing but no error printed = the resource is still becoming ready: re-run the verify/describe command until it matches (never add a blind sleep).
+
+WHAT FAILURE LOOKS LIKE:
+  NXDOMAIN or wrong NS.
+
+TROUBLESHOOTING:
+  Zone not delegated at the registrar; record points at a deleted ALB; low-level cache TTL.
+  Method: SYMPTOM -> HYPOTHESIS -> DIAGNOSTIC COMMANDS -> EVIDENCE -> ROOT CAUSE -> FIX -> PREVENTION.
+
+ROOT CAUSE IF IT FAILS:
+  Most likely: Zone not delegated at the registrar; record points at a deleted ALB; low-level cache TTL.
+  Full method: docs/troubleshooting/playbooks.md.
+
+CLEANUP:
+  -
+
+WHAT THIS TEACHES:
+  DNS failure modes.
+
+---------------------------------------------------------------------------
+
+
+===========================================================================
+23. ACM TESTS (optional)
+===========================================================================
+
+TEST ID: 23.1
+TEST NAME: Certificate issued and served
+
+PURPOSE:
+  TLS works with the ACM certificate.
+
+PREREQUISITES:
+  The folders that create what this test touches are applied and verified (scripts/execution-order.txt); kubectl points at the cluster.
+
+WHAT TO DO:
+  Run the commands in order. Read each output before the next one; do not move on after a failure.
+
+COMMANDS:
+  aws acm list-certificates --query 'CertificateSummaryList[].[DomainName,Status]'
+    ^ Reads certificates. Success: Status ISSUED. Failure: PENDING_VALIDATION -> validation CNAME not resolving.
+  echo | openssl s_client -connect origin.<domain>:443 -servername origin.<domain> 2>/dev/null | openssl x509 -noout -subject -dates
+
+EXPECTED RESULT:
+  Status ISSUED; subject *.<domain>.
+
+WHAT SUCCESS LOOKS LIKE:
+  Status ISSUED; subject *.<domain>.
+  Output missing but no error printed = the resource is still becoming ready: re-run the verify/describe command until it matches (never add a blind sleep).
+
+WHAT FAILURE LOOKS LIKE:
+  PENDING_VALIDATION.
+
+TROUBLESHOOTING:
+  Validation CNAME missing or zone not delegated.
+  Method: SYMPTOM -> HYPOTHESIS -> DIAGNOSTIC COMMANDS -> EVIDENCE -> ROOT CAUSE -> FIX -> PREVENTION.
+
+ROOT CAUSE IF IT FAILS:
+  Most likely: Validation CNAME missing or zone not delegated.
+  Full method: docs/troubleshooting/playbooks.md.
+
+CLEANUP:
+  -
+
+WHAT THIS TEACHES:
+  DNS validation and renewal.
+
+---------------------------------------------------------------------------
+
+
+===========================================================================
+24. ALB TESTS
+===========================================================================
+
+TEST ID: 24.1
+TEST NAME: Deploy and reach the application
+
+PURPOSE:
+  Ingress -> ALB -> pods.
+
+PREREQUISITES:
+  The folders that create what this test touches are applied and verified (scripts/execution-order.txt); kubectl points at the cluster.
+
+WHAT TO DO:
+  Run the commands in order. Read each output before the next one; do not move on after a failure.
+
+COMMANDS:
+  IMAGE_TAG=<tag> scripts/deploy-app.sh
+  kubectl $NS get ingress cloudcart -w
+    ^ Reads or changes Kubernetes objects. Success: the expected objects/fields. Failure: NotFound/Forbidden -> namespace, name or RBAC/access entry.
+  ALB=$(kubectl $NS get ingress cloudcart -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+  curl -s -o /dev/null -w '%{http_code}\n' http://$ALB/health
+    ^ Network probe. Success: HTTP 2xx / expected answer. Failure: timeout = network/SG/NetworkPolicy; refused = nothing listening; 403 = WAF/auth; 5xx = backend.
+  curl -s http://$ALB/api/products | jq .
+    ^ Network probe. Success: HTTP 2xx / expected answer. Failure: timeout = network/SG/NetworkPolicy; refused = nothing listening; 403 = WAF/auth; 5xx = backend.
+  aws elbv2 describe-target-health --target-group-arn <tg arn>
+    ^ Reads ELB. Success: load balancer active and targets healthy. Failure: unhealthy targets -> health check path/SG.
+
+EXPECTED RESULT:
+  200 on /health; products JSON; targets healthy with POD IPs.
+
+WHAT SUCCESS LOOKS LIKE:
+  200 on /health; products JSON; targets healthy with POD IPs.
+  Output missing but no error printed = the resource is still becoming ready: re-run the verify/describe command until it matches (never add a blind sleep).
+
+WHAT FAILURE LOOKS LIKE:
+  ADDRESS stays empty / 503 / 502 / 504.
+
+TROUBLESHOOTING:
+  Empty: controller down, IAM, untagged subnets. 503: no healthy targets (health path, readiness, SG). 502: pod closes connection. 504: slow pod.
+  Method: SYMPTOM -> HYPOTHESIS -> DIAGNOSTIC COMMANDS -> EVIDENCE -> ROOT CAUSE -> FIX -> PREVENTION.
+
+ROOT CAUSE IF IT FAILS:
+  Most likely: Empty: controller down, IAM, untagged subnets. 503: no healthy targets (health path, readiness, SG). 502: pod closes connection. 504: slow pod.
+  Full method: docs/troubleshooting/playbooks.md.
+
+CLEANUP:
+  -
+
+WHAT THIS TEACHES:
+  How an ALB reaches pods (target-type ip).
+
+---------------------------------------------------------------------------
+
+TEST ID: 24.2
+TEST NAME: Controlled failure: wrong health check path
+
+PURPOSE:
+  Break health checks on purpose.
+
+PREREQUISITES:
+  The folders that create what this test touches are applied and verified (scripts/execution-order.txt); kubectl points at the cluster.
+
+WHAT TO DO:
+  Run the commands in order. Read each output before the next one; do not move on after a failure.
+
+COMMANDS:
+  kubectl $NS annotate ingress cloudcart alb.ingress.kubernetes.io/healthcheck-path=/nope --overwrite
+    ^ Operates on workloads. Success: rollout complete/metrics returned. Failure: timed out waiting -> describe the pods; "metrics not available" -> metrics-server missing.
+  sleep 30; aws elbv2 describe-target-health --target-group-arn <tg arn>
+
+EXPECTED RESULT:
+  Targets unhealthy; ALB returns 503.
+
+WHAT SUCCESS LOOKS LIKE:
+  Targets unhealthy; ALB returns 503.
+
+WHAT FAILURE LOOKS LIKE:
+  Targets stay healthy.
+
+TROUBLESHOOTING:
+  SYMPTOM 503. HYPOTHESIS: target health. EVIDENCE: Reason Target.FailedHealthChecks. FIX: restore /health.
+  Method: SYMPTOM -> HYPOTHESIS -> DIAGNOSTIC COMMANDS -> EVIDENCE -> ROOT CAUSE -> FIX -> PREVENTION.
+
+ROOT CAUSE IF IT FAILS:
+  Determined by the EVIDENCE step: SYMPTOM 503. HYPOTHESIS: target health. EVIDENCE: Reason Target.FailedHealthChecks. FIX: restore /health.
+  Full method: docs/troubleshooting/playbooks.md.
+
+CLEANUP:
+  kubectl $NS annotate ingress cloudcart alb.ingress.kubernetes.io/healthcheck-path=/health --overwrite
+
+WHAT THIS TEACHES:
+  5xx troubleshooting from the load balancer inward.
+
+---------------------------------------------------------------------------
+
+TEST ID: 24.3
+TEST NAME: NLB contrast
+
+PURPOSE:
+  Layer-4 exposure with static IPs.
+
+PREREQUISITES:
+  The folders that create what this test touches are applied and verified (scripts/execution-order.txt); kubectl points at the cluster.
+
+WHAT TO DO:
+  Run the commands in order. Read each output before the next one; do not move on after a failure.
+
+COMMANDS:
+  scripts/render-k8s.sh; kubectl apply -f .rendered/ingress/nlb-service.yaml; kubectl $NS get svc order-service-nlb
+  curl -s http://<nlb-dns>:8080/health
+    ^ Network probe. Success: HTTP 2xx / expected answer. Failure: timeout = network/SG/NetworkPolicy; refused = nothing listening; 403 = WAF/auth; 5xx = backend.
+
+EXPECTED RESULT:
+  Service gets an NLB DNS name; /health answers.
+
+WHAT SUCCESS LOOKS LIKE:
+  Service gets an NLB DNS name; /health answers.
+  Output missing but no error printed = the resource is still becoming ready: re-run the verify/describe command until it matches (never add a blind sleep).
+
+WHAT FAILURE LOOKS LIKE:
+  EXTERNAL-IP pending.
+
+TROUBLESHOOTING:
+  EIP/subnet count mismatch or controller error.
+  Method: SYMPTOM -> HYPOTHESIS -> DIAGNOSTIC COMMANDS -> EVIDENCE -> ROOT CAUSE -> FIX -> PREVENTION.
+
+ROOT CAUSE IF IT FAILS:
+  Most likely: EIP/subnet count mismatch or controller error.
+  Full method: docs/troubleshooting/playbooks.md.
+
+CLEANUP:
+  kubectl $NS delete svc order-service-nlb
+
+WHAT THIS TEACHES:
+  ALB vs NLB.
+
+---------------------------------------------------------------------------
+
+
+===========================================================================
+25. WAF TESTS
+===========================================================================
+
+TEST ID: 25.1
+TEST NAME: Block a SQL injection pattern
+
+PURPOSE:
+  WAF drops malicious requests before pods see them.
+
+PREREQUISITES:
+  The folders that create what this test touches are applied and verified (scripts/execution-order.txt); kubectl points at the cluster.
+
+WHAT TO DO:
+  Run the commands in order. Read each output before the next one; do not move on after a failure.
+
+COMMANDS:
+  curl -s -o /dev/null -w '%{http_code}\n' "http://$ALB/api/products?id=1%27%20OR%201=1--"
+    ^ Network probe. Success: HTTP 2xx / expected answer. Failure: timeout = network/SG/NetworkPolicy; refused = nothing listening; 403 = WAF/auth; 5xx = backend.
+  aws logs tail aws-waf-logs-cloudcart-lab --since 5m
+    ^ Reads CloudWatch Logs. Success: log lines from the component. Failure: no log group/stream -> logging not configured or no traffic yet.
+
+EXPECTED RESULT:
+  403 and a log entry naming the terminating rule.
+
+WHAT SUCCESS LOOKS LIKE:
+  403 and a log entry naming the terminating rule.
+  Output missing but no error printed = the resource is still becoming ready: re-run the verify/describe command until it matches (never add a blind sleep).
+
+WHAT FAILURE LOOKS LIKE:
+  200.
+
+TROUBLESHOOTING:
+  ACL not attached (annotation missing) or managed_rules_action=count (observe-only).
+  Method: SYMPTOM -> HYPOTHESIS -> DIAGNOSTIC COMMANDS -> EVIDENCE -> ROOT CAUSE -> FIX -> PREVENTION.
+
+ROOT CAUSE IF IT FAILS:
+  Most likely: ACL not attached (annotation missing) or managed_rules_action=count (observe-only).
+  Full method: docs/troubleshooting/playbooks.md.
+
+CLEANUP:
+  -
+
+WHAT THIS TEACHES:
+  WAF scope and rollout.
+
+---------------------------------------------------------------------------
+
+
+===========================================================================
+26. CLOUDFRONT TESTS (optional)
+===========================================================================
+
+TEST ID: 26.1
+TEST NAME: Edge caching
+
+PURPOSE:
+  Static content is cached at the edge.
+
+PREREQUISITES:
+  The folders that create what this test touches are applied and verified (scripts/execution-order.txt); kubectl points at the cluster.
+
+WHAT TO DO:
+  Run the commands in order. Read each output before the next one; do not move on after a failure.
+
+COMMANDS:
+  curl -sI https://cloudcart.<domain>/static/style.css | grep -i x-cache; repeat
+    ^ Network probe. Success: HTTP 2xx / expected answer. Failure: timeout = network/SG/NetworkPolicy; refused = nothing listening; 403 = WAF/auth; 5xx = backend.
+
+EXPECTED RESULT:
+  First Miss, then Hit from cloudfront.
+
+WHAT SUCCESS LOOKS LIKE:
+  First Miss, then Hit from cloudfront.
+  Output missing but no error printed = the resource is still becoming ready: re-run the verify/describe command until it matches (never add a blind sleep).
+
+WHAT FAILURE LOOKS LIKE:
+  502/504.
+
+TROUBLESHOOTING:
+  Origin hostname/certificate mismatch or origin unreachable.
+  Method: SYMPTOM -> HYPOTHESIS -> DIAGNOSTIC COMMANDS -> EVIDENCE -> ROOT CAUSE -> FIX -> PREVENTION.
+
+ROOT CAUSE IF IT FAILS:
+  Most likely: Origin hostname/certificate mismatch or origin unreachable.
+  Full method: docs/troubleshooting/playbooks.md.
+
+CLEANUP:
+  -
+
+WHAT THIS TEACHES:
+  Edge TLS and caching.
+
+---------------------------------------------------------------------------
+
+
+===========================================================================
+27. NETWORKPOLICY TESTS
+===========================================================================
+
+TEST ID: 27.1
+TEST NAME: Default deny and allow rules
+
+PURPOSE:
+  Prove ingress isolation.
+
+PREREQUISITES:
+  The folders that create what this test touches are applied and verified (scripts/execution-order.txt); kubectl points at the cluster.
+
+WHAT TO DO:
+  Run the commands in order. Read each output before the next one; do not move on after a failure.
+
+COMMANDS:
+  kubectl $NS get networkpolicy
+    ^ Reads or changes Kubernetes objects. Success: the expected objects/fields. Failure: NotFound/Forbidden -> namespace, name or RBAC/access entry.
+  kubectl $NS exec deploy/load-test -- wget -T3 -qO- http://order-service:8080/health   # blocked: only frontend may call the APIs
+    ^ Reaches into a pod or forwards a port. Success: a shell/connection. Failure: connection refused/timeout -> app not listening or NetworkPolicy/SG blocking.
+  kubectl $NS exec deploy/frontend -- wget -T3 -qO- http://product-service:8080/health   # allowed
+    ^ Reaches into a pod or forwards a port. Success: a shell/connection. Failure: connection refused/timeout -> app not listening or NetworkPolicy/SG blocking.
+
+EXPECTED RESULT:
+  Blocked call times out; allowed call returns ok.
+
+WHAT SUCCESS LOOKS LIKE:
+  Blocked call times out; allowed call returns ok.
+  Output missing but no error printed = the resource is still becoming ready: re-run the verify/describe command until it matches (never add a blind sleep).
+
+WHAT FAILURE LOOKS LIKE:
+  Both succeed.
+
+TROUBLESHOOTING:
+  Network policy enforcement off (enableNetworkPolicy) or baseline not applied.
+  Method: SYMPTOM -> HYPOTHESIS -> DIAGNOSTIC COMMANDS -> EVIDENCE -> ROOT CAUSE -> FIX -> PREVENTION.
+
+ROOT CAUSE IF IT FAILS:
+  Most likely: Network policy enforcement off (enableNetworkPolicy) or baseline not applied.
+  Full method: docs/troubleshooting/playbooks.md.
+
+CLEANUP:
+  -
+
+WHAT THIS TEACHES:
+  NetworkPolicy semantics and enforcement.
+
+---------------------------------------------------------------------------
+
+TEST ID: 27.2
+TEST NAME: Controlled failure: egress policy
+
+PURPOSE:
+  A policy that breaks the frontend.
+
+PREREQUISITES:
+  The folders that create what this test touches are applied and verified (scripts/execution-order.txt); kubectl points at the cluster.
+
+WHAT TO DO:
+  Run the commands in order. Read each output before the next one; do not move on after a failure.
+
+COMMANDS:
+  kubectl apply -f kubernetes/network-policies/99-break-frontend-egress.yaml
+    ^ Creates/updates objects. Success: "created"/"configured". Failure: validation or admission error text -> fix the manifest.
+  kubectl $NS exec deploy/frontend -- wget -T3 -qO- http://product-service:8080/health
+    ^ Reaches into a pod or forwards a port. Success: a shell/connection. Failure: connection refused/timeout -> app not listening or NetworkPolicy/SG blocking.
+
+EXPECTED RESULT:
+  Timeout.
+
+WHAT SUCCESS LOOKS LIKE:
+  Timeout.
+
+WHAT FAILURE LOOKS LIKE:
+  Call succeeds.
+
+TROUBLESHOOTING:
+  SYMPTOM timeout. HYPOTHESIS: NetworkPolicy. EVIDENCE: kubectl describe networkpolicy. FIX: delete it.
+  Method: SYMPTOM -> HYPOTHESIS -> DIAGNOSTIC COMMANDS -> EVIDENCE -> ROOT CAUSE -> FIX -> PREVENTION.
+
+ROOT CAUSE IF IT FAILS:
+  Determined by the EVIDENCE step: SYMPTOM timeout. HYPOTHESIS: NetworkPolicy. EVIDENCE: kubectl describe networkpolicy. FIX: delete it.
+  Full method: docs/troubleshooting/playbooks.md.
+
+CLEANUP:
+  kubectl $NS delete networkpolicy break-frontend-egress
+
+WHAT THIS TEACHES:
+  Policies are additive; egress needs DNS.
+
+---------------------------------------------------------------------------
+
+
+===========================================================================
+28. SECURITY GROUP TESTS
+===========================================================================
+
+TEST ID: 28.1
+TEST NAME: Security Groups for Pods
+
+PURPOSE:
+  Per-pod SG on a supported instance type.
+
+PREREQUISITES:
+  The folders that create what this test touches are applied and verified (scripts/execution-order.txt); kubectl points at the cluster.
+
+WHAT TO DO:
+  Run the commands in order. Read each output before the next one; do not move on after a failure.
+
+COMMANDS:
+  set vpc_cni_pod_eni=true (06-eks); apply 43; kubectl apply -f .rendered/security-groups-for-pods/securitygrouppolicy.yaml
+  kubectl $NS describe pod -l cloudcart.io/db-access=true | grep -i pod-eni
+    ^ Shows state, conditions and EVENTS. Success: no Warning events. Failure: the Events section names the cause (FailedScheduling, FailedMount, Failed pull...).
+
+EXPECTED RESULT:
+  Annotation vpc.amazonaws.com/pod-eni with a branch ENI.
+
+WHAT SUCCESS LOOKS LIKE:
+  Annotation vpc.amazonaws.com/pod-eni with a branch ENI.
+  Output missing but no error printed = the resource is still becoming ready: re-run the verify/describe command until it matches (never add a blind sleep).
+
+WHAT FAILURE LOOKS LIKE:
+  Pod ContainerCreating (branch ENI).
+
+TROUBLESHOOTING:
+  Unsupported instance type (t3) or trunking not enabled.
+  Method: SYMPTOM -> HYPOTHESIS -> DIAGNOSTIC COMMANDS -> EVIDENCE -> ROOT CAUSE -> FIX -> PREVENTION.
+
+ROOT CAUSE IF IT FAILS:
+  Most likely: Unsupported instance type (t3) or trunking not enabled.
+  Full method: docs/troubleshooting/playbooks.md.
+
+CLEANUP:
+  -
+
+WHAT THIS TEACHES:
+  SG for pods vs node SG.
+
+---------------------------------------------------------------------------
+
+
+===========================================================================
+29. OBSERVABILITY TESTS
+===========================================================================
+
+TEST ID: 29.1
+TEST NAME: Signals
+
+PURPOSE:
+  Logs, metrics and alarms work.
+
+PREREQUISITES:
+  The folders that create what this test touches are applied and verified (scripts/execution-order.txt); kubectl points at the cluster.
+
+WHAT TO DO:
+  Run the commands in order. Read each output before the next one; do not move on after a failure.
+
+COMMANDS:
+  aws logs tail /aws/containerinsights/$CLUSTER_NAME/application --since 10m | head
+    ^ Reads CloudWatch Logs. Success: log lines from the component. Failure: no log group/stream -> logging not configured or no traffic yet.
+  aws cloudwatch describe-alarms --query 'MetricAlarms[].[AlarmName,StateValue]'
+    ^ Reads that service. Success: the resource exists in the expected state. Failure: NotFound/AccessDenied -> wrong region, not applied, or missing IAM.
+  aws cloudtrail lookup-events --max-results 5
+    ^ Reads trail data. Success: events with the expected principal. Failure: empty -> events take minutes to appear.
+
+EXPECTED RESULT:
+  Container logs, alarms listed, recent API events.
+
+WHAT SUCCESS LOOKS LIKE:
+  Container logs, alarms listed, recent API events.
+  Output missing but no error printed = the resource is still becoming ready: re-run the verify/describe command until it matches (never add a blind sleep).
+
+WHAT FAILURE LOOKS LIKE:
+  Empty log group.
+
+TROUBLESHOOTING:
+  Agent role/association missing in 35-container-insights.
+  Method: SYMPTOM -> HYPOTHESIS -> DIAGNOSTIC COMMANDS -> EVIDENCE -> ROOT CAUSE -> FIX -> PREVENTION.
+
+ROOT CAUSE IF IT FAILS:
+  Most likely: Agent role/association missing in 35-container-insights.
+  Full method: docs/troubleshooting/playbooks.md.
+
+CLEANUP:
+  -
+
+WHAT THIS TEACHES:
+  Logs vs metrics vs traces vs audit.
+
+---------------------------------------------------------------------------
+
+
+===========================================================================
+30. FAILURE INJECTION TESTS (summary of controlled failures)
+===========================================================================
+
+TEST ID: 30.1
+TEST NAME: CrashLoopBackOff / OOMKilled / Pending / probes
+
+PURPOSE:
+  Reproduce the classic workload failures.
+
+PREREQUISITES:
+  The folders that create what this test touches are applied and verified (scripts/execution-order.txt); kubectl points at the cluster.
+
+WHAT TO DO:
+  Run the commands in order. Read each output before the next one; do not move on after a failure.
+
+COMMANDS:
+  kubectl $NS run crash --image=public.ecr.aws/docker/library/busybox:1.37 -- sh -c 'exit 1'
+    ^ Creates/updates objects. Success: "created"/"configured". Failure: validation or admission error text -> fix the manifest.
+  kubectl $NS run oom --image=public.ecr.aws/docker/library/busybox:1.37 --overrides='{"spec":{"containers":[{"name":"oom","image":"public.ecr.aws/docker/library/busybox:1.37","command":["sh","-c","head -c 500m /dev/zero | tail"],"resources":{"limits":{"memory":"20Mi"}}}]}}'
+    ^ Creates/updates objects. Success: "created"/"configured". Failure: validation or admission error text -> fix the manifest.
+  kubectl $NS run big --image=public.ecr.aws/eks-distro/kubernetes/pause:3.9 --overrides='{"spec":{"containers":[{"name":"big","image":"public.ecr.aws/eks-distro/kubernetes/pause:3.9","resources":{"requests":{"cpu":"100"}}}]}}'
+    ^ Creates/updates objects. Success: "created"/"configured". Failure: validation or admission error text -> fix the manifest.
+  kubectl $NS get pods; kubectl $NS describe pod crash oom big | grep -E 'Reason|State|Events|Insufficient'
+    ^ Lists pods. Success: Running and READY n/n. Failure: Pending, CrashLoopBackOff, ImagePullBackOff -> kubectl describe pod / logs.
+
+EXPECTED RESULT:
+  crash: CrashLoopBackOff (exit 1); oom: OOMKilled (Reason); big: Pending (Insufficient cpu).
+
+WHAT SUCCESS LOOKS LIKE:
+  crash: CrashLoopBackOff (exit 1); oom: OOMKilled (Reason); big: Pending (Insufficient cpu).
+  Output missing but no error printed = the resource is still becoming ready: re-run the verify/describe command until it matches (never add a blind sleep).
+
+WHAT FAILURE LOOKS LIKE:
+  Pods Running.
+
+TROUBLESHOOTING:
+  Use `kubectl logs --previous`, `describe` Last State, and scheduler events.
+  Method: SYMPTOM -> HYPOTHESIS -> DIAGNOSTIC COMMANDS -> EVIDENCE -> ROOT CAUSE -> FIX -> PREVENTION.
+
+ROOT CAUSE IF IT FAILS:
+  Most likely: Use `kubectl logs --previous`, `describe` Last State, and scheduler events.
+  Full method: docs/troubleshooting/playbooks.md.
+
+CLEANUP:
+  kubectl $NS delete pod crash oom big
+
+WHAT THIS TEACHES:
+  Reading pod states; requests vs limits.
+
+---------------------------------------------------------------------------
+
+
+===========================================================================
+31. RECOVERY TESTS
+===========================================================================
+
+TEST ID: 31.1
+TEST NAME: Rebuild the application from Git and ECR
+
+PURPOSE:
+  Prove the platform is reproducible (RTO measurement).
+
+PREREQUISITES:
+  The folders that create what this test touches are applied and verified (scripts/execution-order.txt); kubectl points at the cluster.
+
+WHAT TO DO:
+  Run the commands in order. Read each output before the next one; do not move on after a failure.
+
+COMMANDS:
+  date; helm -n cloudcart uninstall cloudcart; IMAGE_TAG=<same tag> scripts/deploy-app.sh; date
+  # for a full drill also destroy and re-apply 10-node-groups, 12-karpenter, 28 ...
+
+EXPECTED RESULT:
+  Application back with the same immutable image; orders table intact.
+
+WHAT SUCCESS LOOKS LIKE:
+  Application back with the same immutable image; orders table intact.
+  Output missing but no error printed = the resource is still becoming ready: re-run the verify/describe command until it matches (never add a blind sleep).
+
+WHAT FAILURE LOOKS LIKE:
+  ImagePullBackOff or missing config.
+
+TROUBLESHOOTING:
+  Image tag missing in ECR or SSM parameters missing; data stores were untouched.
+  Method: SYMPTOM -> HYPOTHESIS -> DIAGNOSTIC COMMANDS -> EVIDENCE -> ROOT CAUSE -> FIX -> PREVENTION.
+
+ROOT CAUSE IF IT FAILS:
+  Most likely: Image tag missing in ECR or SSM parameters missing; data stores were untouched.
+  Full method: docs/troubleshooting/playbooks.md.
+
+CLEANUP:
+  -
+
+WHAT THIS TEACHES:
+  RTO/RPO, declarative recovery.
+
+---------------------------------------------------------------------------
+
+
+===========================================================================
+32. SCALING TESTS
+===========================================================================
+
+TEST ID: 32.1
+TEST NAME: HPA scale out and in
+
+PURPOSE:
+  Load increases pods, then nodes.
+
+PREREQUISITES:
+  The folders that create what this test touches are applied and verified (scripts/execution-order.txt); kubectl points at the cluster.
+
+WHAT TO DO:
+  Run the commands in order. Read each output before the next one; do not move on after a failure.
+
+COMMANDS:
+  kubectl apply -f kubernetes/autoscaling/hpa-apis.yaml -f kubernetes/autoscaling/load-test.yaml
+    ^ Creates/updates objects. Success: "created"/"configured". Failure: validation or admission error text -> fix the manifest.
+  kubectl $NS get hpa -w
+    ^ Reads or changes Kubernetes objects. Success: the expected objects/fields. Failure: NotFound/Forbidden -> namespace, name or RBAC/access entry.
+  kubectl get nodes -w
+    ^ Lists nodes. Success: all Ready. Failure: NotReady -> kubelet/CNI/IAM; none -> node group not created or cannot join.
+  kubectl delete -f kubernetes/autoscaling/load-test.yaml
+    ^ Deletes objects (check the namespace first). Success: "deleted". Failure: stuck Terminating -> finalizer/volume detach.
+
+EXPECTED RESULT:
+  TARGETS above 60%, replicas grow, some pods Pending -> Karpenter adds a node; after load stops pods and nodes shrink.
+
+WHAT SUCCESS LOOKS LIKE:
+  TARGETS above 60%, replicas grow, some pods Pending -> Karpenter adds a node; after load stops pods and nodes shrink.
+  Output missing but no error printed = the resource is still becoming ready: re-run the verify/describe command until it matches (never add a blind sleep).
+
+WHAT FAILURE LOOKS LIKE:
+  HPA shows <unknown>.
+
+TROUBLESHOOTING:
+  metrics-server not Ready or missing CPU requests.
+  Method: SYMPTOM -> HYPOTHESIS -> DIAGNOSTIC COMMANDS -> EVIDENCE -> ROOT CAUSE -> FIX -> PREVENTION.
+
+ROOT CAUSE IF IT FAILS:
+  Most likely: metrics-server not Ready or missing CPU requests.
+  Full method: docs/troubleshooting/playbooks.md.
+
+CLEANUP:
+  kubectl delete -f kubernetes/autoscaling/load-test.yaml
+
+WHAT THIS TEACHES:
+  HPA + Karpenter chain, consolidation.
+
+---------------------------------------------------------------------------
+
+TEST ID: 32.2
+TEST NAME: Prefix delegation density
+
+PURPOSE:
+  60 pods on one node.
+
+PREREQUISITES:
+  The folders that create what this test touches are applied and verified (scripts/execution-order.txt); kubectl points at the cluster.
+
+WHAT TO DO:
+  Run the commands in order. Read each output before the next one; do not move on after a failure.
+
+COMMANDS:
+  set vpc_cni_prefix_delegation=true (06-eks) and enable_prefix_delegation_nodegroup=true (45); kubectl apply -f kubernetes/prefix-delegation/pods-scale.yaml; kubectl get node -l cloudcart.io/node-role=prefix-delegation -o jsonpath='{..allocatable.pods}'
+
+EXPECTED RESULT:
+  allocatable pods 110 and 60 pods Running on one node.
+
+WHAT SUCCESS LOOKS LIKE:
+  allocatable pods 110 and 60 pods Running on one node.
+  Output missing but no error printed = the resource is still becoming ready: re-run the verify/describe command until it matches (never add a blind sleep).
+
+WHAT FAILURE LOOKS LIKE:
+  Most pods Pending.
+
+TROUBLESHOOTING:
+  Only one of the two switches (CNI/kubelet) was changed or the old node was not replaced.
+  Method: SYMPTOM -> HYPOTHESIS -> DIAGNOSTIC COMMANDS -> EVIDENCE -> ROOT CAUSE -> FIX -> PREVENTION.
+
+ROOT CAUSE IF IT FAILS:
+  Most likely: Only one of the two switches (CNI/kubelet) was changed or the old node was not replaced.
+  Full method: docs/troubleshooting/playbooks.md.
+
+CLEANUP:
+  kubectl delete -f kubernetes/prefix-delegation/pods-scale.yaml; scale the node group to 0
+
+WHAT THIS TEACHES:
+  IP allocation and pod density.
+
+---------------------------------------------------------------------------
+
+
+===========================================================================
+33. SECURITY TESTS
+===========================================================================
+
+TEST ID: 33.1
+TEST NAME: No static credentials anywhere
+
+PURPOSE:
+  Search the repository and cluster.
+
+PREREQUISITES:
+  The folders that create what this test touches are applied and verified (scripts/execution-order.txt); kubectl points at the cluster.
+
+WHAT TO DO:
+  Run the commands in order. Read each output before the next one; do not move on after a failure.
+
+COMMANDS:
+  git grep -nEi 'AKIA|aws_secret_access_key|aws_access_key_id' -- . ':!docs' ':!USER_GUIDE.txt' ':!README.md' ; kubectl get secrets -A | grep -v -E 'helm|token|argocd'
+
+EXPECTED RESULT:
+  No matches; no application Secrets.
+
+WHAT SUCCESS LOOKS LIKE:
+  No matches; no application Secrets.
+  Output missing but no error printed = the resource is still becoming ready: re-run the verify/describe command until it matches (never add a blind sleep).
+
+WHAT FAILURE LOOKS LIKE:
+  Any match.
+
+TROUBLESHOOTING:
+  Remove it, rotate the credential, move to Pod Identity/Secrets Manager.
+  Method: SYMPTOM -> HYPOTHESIS -> DIAGNOSTIC COMMANDS -> EVIDENCE -> ROOT CAUSE -> FIX -> PREVENTION.
+
+ROOT CAUSE IF IT FAILS:
+  Most likely: Remove it, rotate the credential, move to Pod Identity/Secrets Manager.
+  Full method: docs/troubleshooting/playbooks.md.
+
+CLEANUP:
+  -
+
+WHAT THIS TEACHES:
+  Credential hygiene.
+
+---------------------------------------------------------------------------
+
+TEST ID: 33.2
+TEST NAME: Container hardening
+
+PURPOSE:
+  Pods run as non-root with a read-only filesystem.
+
+PREREQUISITES:
+  The folders that create what this test touches are applied and verified (scripts/execution-order.txt); kubectl points at the cluster.
+
+WHAT TO DO:
+  Run the commands in order. Read each output before the next one; do not move on after a failure.
+
+COMMANDS:
+  kubectl $NS exec deploy/product-service -- id; kubectl $NS exec deploy/product-service -- touch /x
+    ^ Reaches into a pod or forwards a port. Success: a shell/connection. Failure: connection refused/timeout -> app not listening or NetworkPolicy/SG blocking.
+
+EXPECTED RESULT:
+  uid=10001; touch fails (read-only file system).
+
+WHAT SUCCESS LOOKS LIKE:
+  uid=10001; touch fails (read-only file system).
+  Output missing but no error printed = the resource is still becoming ready: re-run the verify/describe command until it matches (never add a blind sleep).
+
+WHAT FAILURE LOOKS LIKE:
+  uid=0 or write succeeds.
+
+TROUBLESHOOTING:
+  securityContext missing from the Deployment.
+  Method: SYMPTOM -> HYPOTHESIS -> DIAGNOSTIC COMMANDS -> EVIDENCE -> ROOT CAUSE -> FIX -> PREVENTION.
+
+ROOT CAUSE IF IT FAILS:
+  Most likely: securityContext missing from the Deployment.
+  Full method: docs/troubleshooting/playbooks.md.
+
+CLEANUP:
+  -
+
+WHAT THIS TEACHES:
+  Pod security.
+
+---------------------------------------------------------------------------
+
+TEST ID: 33.3
+TEST NAME: GuardDuty / Security Hub sample
+
+PURPOSE:
+  Generate findings and read them.
+
+PREREQUISITES:
+  The folders that create what this test touches are applied and verified (scripts/execution-order.txt); kubectl points at the cluster.
+
+WHAT TO DO:
+  Run the commands in order. Read each output before the next one; do not move on after a failure.
+
+COMMANDS:
+  aws guardduty create-sample-findings --detector-id $(aws guardduty list-detectors --query 'DetectorIds[0]' --output text)
+    ^ Reads that service. Success: the resource exists in the expected state. Failure: NotFound/AccessDenied -> wrong region, not applied, or missing IAM.
+  aws securityhub get-findings --max-items 5
+    ^ Reads that service. Success: the resource exists in the expected state. Failure: NotFound/AccessDenied -> wrong region, not applied, or missing IAM.
+
+EXPECTED RESULT:
+  Sample findings; Security Hub shows lab-expected findings (public endpoint...).
+
+WHAT SUCCESS LOOKS LIKE:
+  Sample findings; Security Hub shows lab-expected findings (public endpoint...).
+  Output missing but no error printed = the resource is still becoming ready: re-run the verify/describe command until it matches (never add a blind sleep).
+
+WHAT FAILURE LOOKS LIKE:
+  No detector.
+
+TROUBLESHOOTING:
+  Folder 37/38 not applied or disabled.
+  Method: SYMPTOM -> HYPOTHESIS -> DIAGNOSTIC COMMANDS -> EVIDENCE -> ROOT CAUSE -> FIX -> PREVENTION.
+
+ROOT CAUSE IF IT FAILS:
+  Most likely: Folder 37/38 not applied or disabled.
+  Full method: docs/troubleshooting/playbooks.md.
+
+CLEANUP:
+  -
+
+WHAT THIS TEACHES:
+  Detective controls and triage.
+
+---------------------------------------------------------------------------
+
+
+===========================================================================
+34. COST VALIDATION
+===========================================================================
+
+TEST ID: 34.1
+TEST NAME: What is running and billing
+
+PURPOSE:
+  Find expensive resources before leaving.
+
+PREREQUISITES:
+  The folders that create what this test touches are applied and verified (scripts/execution-order.txt); kubectl points at the cluster.
+
+WHAT TO DO:
+  Run the commands in order. Read each output before the next one; do not move on after a failure.
+
+COMMANDS:
+  scripts/cost-check.sh
+    ^ Lists billing resources (EKS, NAT, LBs, instances, volumes, EIPs, RDS, caches, EFS, endpoints). Success: only what you expect. Failure: orphans -> delete them or find which tool created them.
+
+EXPECTED RESULT:
+  Lists EKS, NAT gateways, load balancers, instances, unattached volumes, EIPs, RDS, caches, EFS, endpoints.
+
+WHAT SUCCESS LOOKS LIKE:
+  Lists EKS, NAT gateways, load balancers, instances, unattached volumes, EIPs, RDS, caches, EFS, endpoints.
+  Output missing but no error printed = the resource is still becoming ready: re-run the verify/describe command until it matches (never add a blind sleep).
+
+WHAT FAILURE LOOKS LIKE:
+  Resources you did not expect.
+
+TROUBLESHOOTING:
+  Orphans come from objects created outside Terraform (Ingress, PVC, Karpenter).
+  Method: SYMPTOM -> HYPOTHESIS -> DIAGNOSTIC COMMANDS -> EVIDENCE -> ROOT CAUSE -> FIX -> PREVENTION.
+
+ROOT CAUSE IF IT FAILS:
+  Most likely: Orphans come from objects created outside Terraform (Ingress, PVC, Karpenter).
+  Full method: docs/troubleshooting/playbooks.md.
+
+CLEANUP:
+  -
+
+WHAT THIS TEACHES:
+  Cost drivers.
+
+---------------------------------------------------------------------------
+
+
+===========================================================================
+35. CLEANUP
+===========================================================================
+
+TEST ID: 35.1
+TEST NAME: Reverse-order teardown
+
+PURPOSE:
+  Remove everything safely.
+
+PREREQUISITES:
+  The folders that create what this test touches are applied and verified (scripts/execution-order.txt); kubectl points at the cluster.
+
+WHAT TO DO:
+  Run the commands in order. Read each output before the next one; do not move on after a failure.
+
+COMMANDS:
+  scripts/destroy-all.sh   # asks for confirmation at each step
+    ^ DESTRUCTIVE: tears down folders in reverse dependency order, confirming each step. Success: each folder destroyed. Failure: DependencyViolation -> an LB/ENI created by Kubernetes still exists.
+  scripts/cost-check.sh
+    ^ Lists billing resources (EKS, NAT, LBs, instances, volumes, EIPs, RDS, caches, EFS, endpoints). Success: only what you expect. Failure: orphans -> delete them or find which tool created them.
+
+EXPECTED RESULT:
+  cost-check lists nothing you care about; only the state bucket remains.
+
+WHAT SUCCESS LOOKS LIKE:
+  cost-check lists nothing you care about; only the state bucket remains.
+  Output missing but no error printed = the resource is still becoming ready: re-run the verify/describe command until it matches (never add a blind sleep).
+
+WHAT FAILURE LOOKS LIKE:
+  DependencyViolation when deleting the VPC.
+
+TROUBLESHOOTING:
+  A load balancer or ENI created by Kubernetes still exists: delete the Ingress/Service and wait for the ALB to disappear first.
+  Method: SYMPTOM -> HYPOTHESIS -> DIAGNOSTIC COMMANDS -> EVIDENCE -> ROOT CAUSE -> FIX -> PREVENTION.
+
+ROOT CAUSE IF IT FAILS:
+  Most likely: A load balancer or ENI created by Kubernetes still exists: delete the Ingress/Service and wait for the ALB to disappear first.
+  Full method: docs/troubleshooting/playbooks.md.
+
+CLEANUP:
+  Optionally delete 00-bootstrap last (remove prevent_destroy deliberately).
+
+WHAT THIS TEACHES:
+  DESTRUCTIVE actions, ordering, orphaned resources.
+
+---------------------------------------------------------------------------
+

@@ -1,0 +1,19 @@
+# EBS SNAPSHOT (backup of a PVC). Requires the external-snapshotter CRDs + controller (EKS add-on "snapshot-controller") -- install it first:
+#   aws eks create-addon --cluster-name <cluster> --addon-name snapshot-controller
+# A VolumeSnapshot creates an EBS snapshot (regional, incremental); a new PVC with dataSource pointing at it restores the data in any AZ.
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshotClass
+metadata:
+  name: ebs-snapshots
+driver: ebs.csi.aws.com
+deletionPolicy: Delete
+---
+apiVersion: snapshot.storage.k8s.io/v1
+kind: VolumeSnapshot
+metadata:
+  name: ebs-demo-snap
+  namespace: cloudcart
+spec:
+  volumeSnapshotClassName: ebs-snapshots
+  source:
+    persistentVolumeClaimName: ebs-demo

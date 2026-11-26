@@ -1,0 +1,16 @@
+# SECURITY GROUPS FOR PODS (terraform/43-security-groups-for-pods): give the order-service pods their OWN security group.
+# Needs: vpc_cni_pod_eni=true in terraform/06-eks, pods running on a Nitro instance that supports trunking (NOT t3: use Karpenter m5/c5).
+# Pods matching the selector get a branch ENI with the listed SG(s) (the SG must also include the cluster SG rule from terraform/43).
+# Render with scripts/render-k8s.sh (fills ${POD_SG_ID}).
+apiVersion: vpcresources.k8s.aws/v1beta1
+kind: SecurityGroupPolicy
+metadata:
+  name: order-service-db
+  namespace: cloudcart
+spec:
+  podSelector:
+    matchLabels:
+      cloudcart.io/db-access: "true"
+  securityGroups:
+    groupIds:
+      - ${POD_SG_ID}

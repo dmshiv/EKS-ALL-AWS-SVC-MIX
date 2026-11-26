@@ -1,0 +1,6 @@
+apiVersion: v2
+name: cloudcart
+description: CloudCart (frontend, product-service, order-service, worker) for Amazon EKS
+type: application
+version: 1.0.0
+appVersion: "1.0.0"

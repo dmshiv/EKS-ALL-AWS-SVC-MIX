@@ -1,0 +1,19 @@
+# IRSA DEMO (terraform/09-irsa). Unlike Pod Identity, IRSA needs the annotation below: the EKS pod identity webhook reads it, injects
+# AWS_ROLE_ARN + AWS_WEB_IDENTITY_TOKEN_FILE, and the SDK exchanges the projected JWT with STS AssumeRoleWithWebIdentity.
+# The role trust policy only accepts the subjects  system:serviceaccount:cloudcart:irsa-demo  and  system:serviceaccount:fargate-demo:irsa-demo.
+# Render with: IRSA_DEMO_ROLE_ARN=$(terraform -chdir=terraform/09-irsa output -raw irsa_demo_role_arn) envsubst < this file | kubectl apply -f -
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: irsa-demo
+  namespace: cloudcart
+  annotations:
+    eks.amazonaws.com/role-arn: ${IRSA_DEMO_ROLE_ARN}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: irsa-demo
+  namespace: fargate-demo
+  annotations:
+    eks.amazonaws.com/role-arn: ${IRSA_DEMO_ROLE_ARN}

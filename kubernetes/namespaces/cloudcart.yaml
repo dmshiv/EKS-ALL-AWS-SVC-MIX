@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cloudcart
+  labels:
+    app.kubernetes.io/part-of: cloudcart
+    # Pod Security Admission: the API server REJECTS pods that violate "baseline" and WARNS/AUDITS against "restricted".
+    # Our pods already satisfy restricted (non-root, no privilege escalation, dropped capabilities, seccomp), so this is a guardrail
+    # against someone deploying a privileged pod into the application namespace.
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted

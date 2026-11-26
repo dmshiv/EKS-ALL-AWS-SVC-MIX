@@ -1,0 +1,40 @@
+# GATEWAY API (the successor to Ingress) -- documentation manifest, NOT applied by default.
+#
+# Ingress limits: one resource type for everything, behaviour hidden in annotations, no role separation. Gateway API splits roles:
+#   GatewayClass (infrastructure provider)  ->  Gateway (platform team: listeners, TLS)  ->  HTTPRoute (app team: routing rules).
+# The AWS Load Balancer Controller can program an ALB from Gateway/HTTPRoute when its Gateway API feature gates are enabled
+# (terraform/28-load-balancer-controller variable enable_gateway_api=true) and the Gateway API CRDs are installed. VERIFY the supported
+# gateway classes/versions in the controller documentation for your controller version before using this in production.
+#
+# To try it:
+#   1. kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/latest/download/standard-install.yaml   (CRDs)
+#   2. terraform apply with enable_gateway_api=true in terraform/28-load-balancer-controller
+#   3. kubectl apply -f this file, then remove the Ingress so two objects do not compete for the same hostname.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: cloudcart
+  namespace: cloudcart
+spec:
+  gatewayClassName: alb          # class name created by the AWS Gateway API integration; verify with: kubectl get gatewayclass
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces: {from: Same}
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: frontend
+  namespace: cloudcart
+spec:
+  parentRefs:
+    - name: cloudcart
+  rules:
+    - matches:
+        - path: {type: PathPrefix, value: /}
+      backendRefs:
+        - name: frontend
+          port: 80

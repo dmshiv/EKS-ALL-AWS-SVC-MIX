@@ -1,0 +1,10 @@
+# Namespace whose pods run on FARGATE (matches the selector of the profile created in terraform/11-fargate).
+# Fargate lab: Pod Identity is NOT supported here, so the pod uses IRSA (serviceaccounts/irsa-demo.yaml).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: fargate-demo
+  labels:
+    app.kubernetes.io/part-of: cloudcart
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/warn: restricted

@@ -1,0 +1,107 @@
+# ==============================================================================================
+# WHAT IS THIS FILE? (the 10-second version)
+# NetworkPolicy = FIREWALL RULES between the apps inside the cluster.
+# This file controls INCOMING traffic ("Ingress"): who is allowed to KNOCK on whose door along
+# the path   internet -> load balancer -> frontend -> the two API apps.
+# A "deny EVERYTHING incoming" baseline already exists (built by terraform/42-network-policies),
+# so the three rules in this file are the few carefully-chosen DOORS that get unlocked.
+# ==============================================================================================
+#
+# ALLOW RULES that sit on top of the platform baseline (terraform/42-network-policies = deny ALL INGRESS in the namespace).
+#
+# NetworkPolicy is ADDITIVE: once the baseline selects every pod for Ingress, only what the policies below allow reaches a pod.
+# Enforcement requires enableNetworkPolicy=true on the VPC CNI add-on (terraform/06-eks); otherwise these objects are silently ignored.
+# Render with scripts/render-k8s.sh (fills ${VPC_CIDR}).
+# (Plain words:
+#  - "Additive" = rules can only UNLOCK doors; they can never cancel each other. The baseline locked
+#    every door; each rule below opens exactly one specific door.
+#  - The rules only work because the cluster's networking add-on (the "VPC CNI") is told to ENFORCE
+#    them. Without that switch this file would be silently ignored and every door would stand open.
+#  - ${VPC_CIDR} is a blank the render script fills in with your network's IP address range.
+#    CIDR = shorthand for "a whole range of IP addresses in one line".)
+#
+# WHY ipBlock FOR THE ALB: with target-type ip the ALB sends traffic to the pod from ENIs inside the VPC. The CNI sees a SOURCE IP, not a
+# pod label, so the only way to allow "the load balancer" is the VPC CIDR (production: the public-subnet CIDRs only).
+# (Plain words: the AWS load balancer (ALB) is NOT a pod, so it wears no label we can match. When it
+#  forwards a visitor's request, the firewall only sees "this came from an IP inside our own network".
+#  So we allow the whole network range — the practical way of saying "the load balancer may knock".
+#  ENI = a virtual network cable in AWS.)
+
+# ---- DOOR 1: the AWS load balancer (ALB) may talk to the frontend --------------------------------
+# The API dialect for network rules (networking.k8s.io/v1).
+apiVersion: networking.k8s.io/v1
+# WHAT this creates: one firewall rule-set.
+kind: NetworkPolicy
+metadata:
+  # The name says exactly what it allows: ALB -> frontend.
+  name: allow-alb-to-frontend
+  # It lives in (and only affects) the "cloudcart" room of the cluster.
+  namespace: cloudcart
+spec:
+  # WHO THIS RULE GUARDS: every pod labelled "frontend".
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: frontend}
+  # Ingress = this rule controls INCOMING knocks only (not what the frontend sends out).
+  policyTypes: [Ingress]
+  # THE DOOR:
+  ingress:
+    # FROM whom: any IP inside our own network (the load balancer's traffic arrives from such IPs).
+    - from:
+        - ipBlock: {cidr: ${VPC_CIDR}}
+      # ON which door: TCP port 8080 — the port the frontend listens on (see its Deployment).
+      ports:
+        - {protocol: TCP, port: 8080}
+---
+# frontend (nginx proxy) -> the two APIs. Label-based: only pods labelled frontend may call them.
+# (Plain words: the frontend is a web server (nginx) that passes requests on to the two API apps.
+#  This rule says ONLY pods wearing the "frontend" label may knock on the APIs — a hacked random
+#  pod elsewhere in the cluster cannot.)
+
+# ---- DOOR 2: the frontend may call the two API apps ----------------------------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-frontend-to-apis
+  namespace: cloudcart
+spec:
+  # WHO THIS RULE GUARDS: the two API apps. (An Ingress rule is always written on the RECEIVER.)
+  # "matchExpressions ... In [product-service, order-service]" = "any pod whose name label is
+  #  one of these two" — like matchLabels but for a list.
+  podSelector:
+    matchExpressions:
+      - {key: app.kubernetes.io/name, operator: In, values: [product-service, order-service]}
+  # Incoming traffic only.
+  policyTypes: [Ingress]
+  ingress:
+    # FROM whom: only pods wearing the "frontend" label (matched by label, not IP — real pods have labels).
+    - from:
+        - podSelector:
+            matchLabels: {app.kubernetes.io/name: frontend}
+      # ON which door: the APIs' port, 8080.
+      ports:
+        - {protocol: TCP, port: 8080}
+---
+# NLB demo (kubernetes/ingress/nlb-service.yaml): client traffic arrives from VPC IPs, same reasoning as the ALB rule.
+# (Plain words: the NLB is the other kind of AWS load balancer (used in a demo file). Just like the ALB,
+#  it is not a pod and has no label, so again we must match by IP range.)
+
+# ---- DOOR 3: the other load balancer (NLB demo) may call order-service ---------------------------
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-nlb-to-order-service
+  namespace: cloudcart
+spec:
+  # Guards only the order-service pods.
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: order-service}
+  policyTypes: [Ingress]
+  ingress:
+    # FROM whom: 0.0.0.0/0 = "any IP address at all". It looks wide open, but the only road to these
+    # pods is through the load balancer, so in practice it means "whoever the load balancer sends".
+    # (This loose version is fine for the lab; production would narrow it to the VPC range.)
+    - from:
+        - ipBlock: {cidr: 0.0.0.0/0}
+      # ON which door: order-service's port 8080.
+      ports:
+        - {protocol: TCP, port: 8080}

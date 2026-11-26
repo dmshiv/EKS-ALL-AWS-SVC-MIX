@@ -1,0 +1,47 @@
+# INTERNET-FACING ALB created by the AWS Load Balancer Controller (terraform/28-load-balancer-controller) from this Ingress.
+#
+#   user -> Route 53 -> CloudFront (32) -> [WAF (33)] -> ALB (public subnets, found by tag kubernetes.io/role/elb=1)
+#        -> target group (target-type ip: the POD IPs of Service "frontend") -> container :8080
+#
+# Render:  scripts/render-k8s.sh  (fills ${CERT_ARN} ${WAF_ARN} ${LOGS_BUCKET} ${ORIGIN_HOST} from terraform outputs)
+# When no domain is configured, the lines for the certificate, HTTPS listener and host are removed by render-k8s.sh and the ALB serves HTTP
+# on its generated hostname (kubectl -n cloudcart get ingress cloudcart -o jsonpath='{.status.loadBalancer.ingress[0].hostname}').
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: cloudcart
+  namespace: cloudcart
+  annotations:
+    # scheme: internet-facing -> public subnets; internal would use private subnets (tag internal-elb).
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    # target-type ip: one hop straight to Pod IPs (works because VPC CNI pods have VPC IPs). "instance" = NodePort double hop.
+    alb.ingress.kubernetes.io/target-type: ip
+    # Health check = what the ALB probes on EACH POD. A failing check removes the pod from rotation -> 503 if none are healthy.
+    alb.ingress.kubernetes.io/healthcheck-path: /health
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: "10"
+    alb.ingress.kubernetes.io/healthy-threshold-count: "2"
+    alb.ingress.kubernetes.io/unhealthy-threshold-count: "2"
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+    alb.ingress.kubernetes.io/ssl-policy: ELBSecurityPolicy-TLS13-1-2-2021-06
+    alb.ingress.kubernetes.io/certificate-arn: ${CERT_ARN}
+    # WAF web ACL from terraform/33-waf, evaluated by the ALB before traffic reaches pods.
+    alb.ingress.kubernetes.io/wafv2-acl-arn: ${WAF_ARN}
+    # Access logs to the bucket from terraform/29-alb (evidence for 5xx investigations).
+    alb.ingress.kubernetes.io/load-balancer-attributes: access_logs.s3.enabled=true,access_logs.s3.bucket=${LOGS_BUCKET},access_logs.s3.prefix=alb,idle_timeout.timeout_seconds=60
+    # Pod readiness gates: do not mark the pod Ready until the ALB reports its target healthy (zero-downtime rollouts).
+    alb.ingress.kubernetes.io/target-group-attributes: deregistration_delay.timeout_seconds=30
+    # ExternalDNS (terraform/26-route53) creates the Route 53 alias for this host.
+    external-dns.alpha.kubernetes.io/hostname: ${ORIGIN_HOST}
+spec:
+  ingressClassName: alb
+  rules:
+    - host: ${ORIGIN_HOST}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port: {number: 80}

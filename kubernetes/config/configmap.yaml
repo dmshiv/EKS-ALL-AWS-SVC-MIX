@@ -1,0 +1,17 @@
+# Non-secret, environment-agnostic configuration shared by the AWS-facing services.
+#
+# Notice what is NOT here: no database host, no bucket name, no queue URL, no password. Those live in SSM Parameter Store under
+# SSM_PREFIX (written by the Terraform folders that own each resource) and are read by the pods at startup. This ConfigMap only tells
+# the pod WHERE to look and which region to use.
+#
+# AWS_REGION is set explicitly because nodes enforce IMDSv2 with hop limit 1: pods cannot discover the region from the metadata service.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cloudcart-config
+  namespace: cloudcart
+data:
+  SSM_PREFIX: ${SSM_PREFIX}
+  AWS_REGION: ${AWS_REGION}
+  AWS_DEFAULT_REGION: ${AWS_REGION}
+  LOG_LEVEL: INFO

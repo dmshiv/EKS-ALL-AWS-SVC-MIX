@@ -1,0 +1,47 @@
+# IRSA TEST POD. Run it in the cloudcart namespace (EC2 nodes) AND in fargate-demo (Fargate: the only place IRSA is REQUIRED).
+#   kubectl apply -f kubernetes/fargate/irsa-test-pod.yaml
+#   kubectl -n cloudcart exec irsa-test -- aws sts get-caller-identity       -> assumed-role/<cluster>-irsa-demo/botocore-session-...
+#   kubectl -n cloudcart exec irsa-test -- aws s3 ls s3://<images-bucket>    -> works (s3:ListBucket only)
+#   kubectl -n cloudcart exec irsa-test -- aws s3 cp /etc/hosts s3://<images-bucket>/x   -> AccessDenied (least privilege)
+# On Fargate the pod needs ~1 minute to start (a micro-VM is provisioned) and nodes appear as fargate-ip-... .
+apiVersion: v1
+kind: Pod
+metadata:
+  name: irsa-test
+  namespace: cloudcart
+spec:
+  serviceAccountName: irsa-demo           # annotated with the IRSA role (serviceaccounts/irsa-demo.yaml)
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: aws-cli
+      image: public.ecr.aws/aws-cli/aws-cli:2.22.0
+      command: ["sleep", "3600"]
+      env:
+        - {name: AWS_REGION, value: ${AWS_REGION}}
+        - {name: HOME, value: /tmp}
+      securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+      resources: {requests: {cpu: 50m, memory: 128Mi}, limits: {memory: 256Mi}}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: irsa-test
+  namespace: fargate-demo
+spec:
+  serviceAccountName: irsa-demo
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    seccompProfile: {type: RuntimeDefault}
+  containers:
+    - name: aws-cli
+      image: public.ecr.aws/aws-cli/aws-cli:2.22.0
+      command: ["sleep", "3600"]
+      env:
+        - {name: AWS_REGION, value: ${AWS_REGION}}
+        - {name: HOME, value: /tmp}
+      securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+      resources: {requests: {cpu: 250m, memory: 512Mi}, limits: {memory: 512Mi}}

@@ -1,0 +1,94 @@
+# ==============================================================================================
+# WHAT IS THIS FILE? (the 10-second version)
+# Your cluster runs apps on "nodes" = computers (servers) rented from AWS.
+# KARPENTER is a robot that rents extra nodes automatically when apps need room, and gives them
+# back when they're no longer needed (so you don't pay for idle computers).
+# THIS file is the "order form / recipe" for those rented computers: which operating system,
+# which network, which firewall rules, how big a disk, and which safety switches.
+# It does NOT decide WHEN to rent or WHAT size - that is the NodePool files' job.
+# ==============================================================================================
+#
+# EC2NodeClass = HOW Karpenter builds a node on AWS (AMI, subnets, security groups, IAM role, disk, IMDS settings).
+# NodePool (next files) = WHEN/WHAT to build (instance requirements, Spot vs On-Demand, limits, consolidation).
+#   pending pod -> NodePool whose requirements fit the pod -> its EC2NodeClass -> EC2 Fleet -> instance joins the cluster
+# (Plain words: an app is waiting for room -> a NodePool picks a computer size that fits it -> THIS file says how to
+#  build that computer -> AWS creates it -> it joins the cluster -> the app starts running on it.
+#  Spot = spare AWS computers at a big discount that AWS can take back at short notice.
+#  On-Demand = normal-price computers you keep until you release them.
+#  Consolidation = Karpenter tidying up by removing/merging under-used computers.)
+#
+# Discovery by TAG (no IDs in this file):
+#   subnets           : tag karpenter.sh/discovery=<cluster>  (set on the private subnets by terraform/01-vpc)
+#   security groups   : the SAME tag on BOTH the node SG (terraform/03-security-groups) and the EKS cluster SG (terraform/06-eks), so new nodes
+#                       can reach the control plane AND are the source allowed by the RDS/Redis/EFS rules.
+# (Plain words: instead of typing ID numbers that are easy to get wrong, the right network parts wear a
+#  sticky-note label ("tag") and Karpenter simply looks for that label.
+#  Subnet = a section of the private network. Security group = a firewall (who may talk to whom).
+#  The label sits on both firewalls so new computers can reach the cluster's "brain" (control plane) AND are
+#  trusted by the database (RDS), cache (Redis) and shared-storage (EFS) firewalls.)
+# Render with scripts/deploy-karpenter.sh (fills ${CLUSTER_NAME} ${NODE_ROLE_NAME}; ${AMI_ALIAS} defaults to al2023@latest, PIN a version in production).
+# (Plain words: the parts written like ${...} are blanks. That script fills them in before the file goes to Kubernetes.
+#  "PIN a version" = choose one exact OS image version instead of "latest", so your servers don't suddenly
+#  switch to a brand-new OS image just because AWS published one.)
+
+# WHICH "dialect" of the Kubernetes language this file speaks.
+# WHY: karpenter.k8s.aws/v1 is Karpenter's stable AWS-specific API (v1).
+apiVersion: karpenter.k8s.aws/v1
+# WHAT this file creates: an "EC2NodeClass" = a reusable recipe for building AWS servers (EC2 = AWS's rentable computers).
+# PURPOSE: write the recipe once, and every server Karpenter makes follows it.
+kind: EC2NodeClass
+# INFO ABOUT the recipe itself.
+metadata:
+  # The recipe's name. WHY: the NodePools point to it by this exact name
+  # (they say nodeClassRef -> name: default), so don't rename it without updating them too.
+  name: default
+# THE RECIPE: how every new server gets built.
+spec:
+  # The server's "ID badge" (an AWS IAM role) = what the server is allowed to do on AWS,
+  # e.g. join the cluster and download app images. WHY: without a badge the server can't join the cluster.
+  # AWS can't attach a role directly to a server; it needs a wrapper called an "instance profile",
+  # and Karpenter builds that wrapper for us. The ${...} is a blank filled in at deploy time.
+  role: ${NODE_ROLE_NAME}          # terraform/12-karpenter output node_role_name; Karpenter creates the instance profile from it
+  # WHICH operating-system image (AMI = the "installation disk"/template) the server boots from.
+  amiSelectorTerms:
+    # "alias" = a shortcut name: "al2023@latest" = Amazon Linux 2023, newest EKS-ready version.
+    # (Blank filled in at deploy time; PIN an exact version in production so it never changes by surprise.)
+    - alias: ${AMI_ALIAS}
+  # WHICH network sections (subnets) the servers may be placed in.
+  subnetSelectorTerms:
+    # Pick every subnet carrying the sticky-note label "karpenter.sh/discovery" = our cluster's name.
+    # WHY: no hard-coded IDs - any subnet with this label is automatically allowed.
+    - tags: {karpenter.sh/discovery: ${CLUSTER_NAME}}
+  # WHICH firewalls (security groups) the servers get.
+  securityGroupSelectorTerms:
+    # Same label trick. WHY: new servers get the same network permissions as the existing ones.
+    - tags: {karpenter.sh/discovery: ${CLUSTER_NAME}}
+  # THE SERVER'S HARD DISK.
+  blockDeviceMappings:
+    # /dev/xvda = the main (boot) disk, where the operating system lives.
+    - deviceName: /dev/xvda
+      # volumeSize: 30Gi           -> 30 GB of space (room for the OS, downloaded app images and logs).
+      # volumeType: gp3            -> a modern SSD type: fast, and cheaper than the older gp2.
+      # encrypted: true            -> data on the disk is scrambled, so a leaked/stolen disk is unreadable.
+      # deleteOnTermination: true  -> when the server is removed, its disk is deleted too (no forgotten disks quietly billing you).
+      ebs: {volumeSize: 30Gi, volumeType: gp3, encrypted: true, deleteOnTermination: true}
+  # IMDSv2 required, hop limit 1: pods cannot steal the NODE role credentials from the metadata service.
+  # (Plain words: every AWS server has a built-in "info desk" (the metadata service, IMDS) that hands out the server's
+  #  "ID badge" keys. The 3 settings below make sure only the server itself can use it - not the apps running inside it.)
+  metadataOptions:
+    # The info desk is open. WHY: the server itself needs it to start up properly.
+    httpEndpoint: enabled
+    # Visitors must first get a short-lived ticket (this is "IMDSv2"). WHY: stops a classic hack where an attacker
+    # tricks an app into asking the info desk for the server's keys.
+    httpTokens: required
+    # The ticket can only travel 1 network step. The server itself is 1 step away; an app (pod) running on it is 2 steps
+    # away, so apps can't get a ticket. WHY: even a hacked app can't steal the server's AWS keys.
+    # (Apps that really need AWS access get their own separate, limited identity instead.)
+    httpPutResponseHopLimit: 1
+  # STICKY-NOTE LABELS stamped on every server and disk Karpenter creates.
+  # PURPOSE: in the AWS console/billing you can see what belongs to which project and who made it -> cost tracking and cleanup.
+  tags:
+    # Which project this server belongs to (handy for filtering your AWS bill).
+    Project: CloudCart
+    # Who created it: the Karpenter robot, not a human - a hint not to edit/delete it by hand.
+    ManagedBy: Karpenter

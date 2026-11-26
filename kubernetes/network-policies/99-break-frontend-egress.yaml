@@ -1,0 +1,49 @@
+# ==============================================================================================
+# WHAT IS THIS FILE? (the 10-second version)
+# This is a DELIBERATE SABOTAGE exercise — a fire drill, not a real config.
+# You apply it on purpose to BREAK the shop (the frontend can no longer reach the APIs),
+# then you practice finding the cause and fixing it, the way you'd handle a real outage at 3 AM.
+# Nothing here should stay applied; deleting this rule IS the fix.
+# ==============================================================================================
+#
+# CONTROLLED FAILURE (USER_GUIDE section 27 / 30): block the frontend from reaching the APIs.
+# Apply, then run  kubectl -n cloudcart exec deploy/frontend -- wget -qO- -T3 http://product-service:8080/health  -> times out.
+# Diagnose:  kubectl -n cloudcart get networkpolicy ; kubectl -n cloudcart describe networkpolicy break-frontend-egress
+# Fix:       kubectl -n cloudcart delete networkpolicy break-frontend-egress
+# (Plain words for the commands above:
+#  - The first command crawls INSIDE the frontend container and tries to fetch product-service's
+#    health page with a 3-second patience. It hangs and times out — the site is "down".
+#  - "Diagnose" lists all firewall rules in the room, then asks Kubernetes to explain this one.
+#    That's how you spot the culprit in a real incident.
+#  - "Fix" simply deletes this rule — the doors re-open immediately.)
+#
+# WHY IT WORKS (the teaching point): the moment ANY NetworkPolicy selects a pod for Egress,
+# that pod may ONLY send what some rule explicitly allows. This rule selects the frontend and
+# allows ONLY the phone book (DNS) — so it can still look up names, but every actual call to the
+# APIs is dropped. Sneaky: name lookup succeeds, so the failure looks like a slow network
+# (timeouts), not an obvious "access denied".
+
+# The API dialect for network rules.
+apiVersion: networking.k8s.io/v1
+# WHAT this creates: one firewall rule-set.
+kind: NetworkPolicy
+metadata:
+  # The name honestly confesses its purpose: it breaks the frontend's outgoing traffic.
+  name: break-frontend-egress
+  namespace: cloudcart
+spec:
+  # WHO IT TARGETS: every pod labelled "frontend".
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: frontend}
+  # Egress = outgoing traffic (what the frontend may CALL, not who may call it).
+  policyTypes: [Egress]
+  # THE TRAP — the only door left open:
+  egress:
+    # TO whom: anything in the "kube-system" namespace...
+    - to:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: kube-system}
+      # ...ON port 53 — that's the DNS phone book, and nothing else.
+      # Everything else the frontend tries (including the APIs on 8080) is silently dropped.
+      ports:
+        - {protocol: UDP, port: 53}

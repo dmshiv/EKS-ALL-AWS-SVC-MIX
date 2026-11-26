@@ -1,0 +1,13 @@
+{
+  "name": "cloudcart-frontend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "CloudCart storefront: static HTML/JS served by nginx. The build step stamps the image version into the page.",
+  "scripts": {
+    "build": "node build.js",
+    "check": "node --check src/static/app.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

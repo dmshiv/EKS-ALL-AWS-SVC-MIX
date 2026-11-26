@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend
+  namespace: cloudcart
+  labels: {app.kubernetes.io/name: frontend}
+spec:
+  # ClusterIP + ALB target-type "ip": the ALB registers the POD IPs directly (via the Ingress), not a NodePort.
+  type: ClusterIP
+  selector: {app.kubernetes.io/name: frontend}
+  ports:
+    - {name: http, port: 80, targetPort: http}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: frontend
+  namespace: cloudcart
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: frontend}

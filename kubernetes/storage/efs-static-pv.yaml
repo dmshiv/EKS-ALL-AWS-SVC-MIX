@@ -1,0 +1,26 @@
+# EFS STATIC PROVISIONING through the access point created by terraform/14-efs (forces uid/gid 10001 and the /cloudcart-shared root).
+# volumeHandle format: <file-system-id>::<access-point-id>. Render with scripts/render-k8s.sh (fills ${EFS_ID} ${EFS_AP_ID}).
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: efs-shared-assets
+spec:
+  capacity: {storage: 5Gi}
+  accessModes: [ReadWriteMany]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: efs-static
+  csi:
+    driver: efs.csi.aws.com
+    volumeHandle: ${EFS_ID}::${EFS_AP_ID}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: shared-assets
+  namespace: cloudcart
+spec:
+  accessModes: [ReadWriteMany]
+  storageClassName: efs-static
+  volumeName: efs-shared-assets
+  resources:
+    requests: {storage: 5Gi}
